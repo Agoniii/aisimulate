@@ -237,7 +237,7 @@ P/D workers, including attention DP. Recommendation keeps host capacity and
 bandwidth fixed while searching supported parallelism. Cluster-shared G2 on
 both P/D roles requires identical explicit integer tensor/pipeline values.
 See the [host-offload contract](../replay/cache.md#native-vllm-host-offload-prediction)
-and [G2 scope](../replay/cache.md).
+and [G2 scope](../replay/cache.md#g2-ownership).
 
 ### Estimator selection and data policies
 

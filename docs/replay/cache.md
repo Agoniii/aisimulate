@@ -188,18 +188,20 @@ Native vLLM has no such rule.
 ## Observability
 
 Reports add `g2_domains` for a shared pool (capacity, resident and used
-blocks); it is omitted otherwise. Ranks that publish KV events also receive the
-shared pool's residency changes as `Stored`/`Removed` events with
-`"tier": "host_pinned"`, starting with a snapshot when a rank joins. A child
-block can become resident before its parent, so each `Stored` run carries its
-first block's prompt index as `start_position`, and the snapshot is ordered by
-position so that parents precede children. The live stream keeps landing order,
-and a snapshot taken after a parent was evicted holds its children without it,
-so consumers must place blocks by `start_position`, not by arrival. Every rank
-of a shared pool retains its blocks' `tokens_hash`, so a block's router identity
-does not depend on whether the rank that stored it publishes events.
-Device events omit `tier`, and a missing `tier` reads as `device`.
-Private G2 keeps the existing G1-only event stream.
+blocks); it is omitted otherwise.
+
+Device (G1) events omit `tier`; a missing `tier` means `device`. A vLLM rank
+with G2 also publishes G2 residency changes as `Stored`/`Removed` events with
+`"tier": "host_pinned"`, as vLLM's offloading connector does. With
+`dp_rank_local` these cover the rank's own cache. With `cluster_shared` they
+cover the whole pool, starting with a snapshot when the rank joins. A child block
+can become resident before its parent, so each
+`Stored` run carries the prompt index of its first block as `start_position`.
+The join snapshot is ordered parent-first, but the live stream keeps landing
+order, and a snapshot taken after a parent was evicted contains the children
+without it. Consumers must place blocks by `start_position`, not by arrival.
+Every rank of a shared pool retains its blocks' `tokens_hash`, so a block's
+Router identity does not depend on which rank stored it.
 
 ## G2 evidence
 
