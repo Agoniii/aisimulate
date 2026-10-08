@@ -971,6 +971,9 @@ impl VllmCore {
         );
         let mutation_now_ms = command_now_ms.filter(|_| allow_destination_admission);
         match command {
+            SchedulerCommand::FlushCache => {
+                anyhow::bail!("cache flush is modelled only for the SGLang backend")
+            }
             SchedulerCommand::Submit(mut request) => {
                 let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
                 request.uuid = Some(uuid);

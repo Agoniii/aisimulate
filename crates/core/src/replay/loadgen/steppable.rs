@@ -169,6 +169,15 @@ pub trait SteppableReplay {
     /// timestamps remain absolute, and capture/SLA settings persist. Previously
     /// retained UUIDs may be reused; request queries then refer to the new epoch.
     fn take_report(&mut self, wall_ms: f64) -> anyhow::Result<ReplayReport>;
+
+    /// SGLang's `/flush_cache` at the current instant: drop every cached KV
+    /// page and reset the page allocator, keeping the runtime and its other
+    /// scheduler state. Returns `false`, changing nothing, unless the runtime
+    /// is idle, as SGLang does while requests are queued or running. The
+    /// flush's KV events reach the placement policy at once. SGLang only.
+    fn flush_cache(&mut self) -> anyhow::Result<bool> {
+        anyhow::bail!("this steppable runtime has no cache flush")
+    }
 }
 
 /// Concrete aggregated runtime behind the steppable seam.
@@ -327,6 +336,14 @@ impl SteppableReplay for SteppableAgg {
     fn take_report(&mut self, wall_ms: f64) -> anyhow::Result<ReplayReport> {
         self.runtime.take_report_dynamic(wall_ms)
     }
+
+    fn flush_cache(&mut self) -> anyhow::Result<bool> {
+        self.runtime.ensure_cache_flush_supported()?;
+        if self.in_flight() > 0 {
+            return Ok(false);
+        }
+        self.runtime.flush_cache_dynamic()
+    }
 }
 
 /// Single-worker topology as a [`SteppableReplay`]: one aggregated engine with
@@ -400,6 +417,10 @@ impl SteppableReplay for SteppableEngine {
     fn take_report(&mut self, wall_ms: f64) -> anyhow::Result<ReplayReport> {
         self.inner.take_report(wall_ms)
     }
+
+    fn flush_cache(&mut self) -> anyhow::Result<bool> {
+        self.inner.flush_cache()
+    }
 }
 
 #[cfg(test)]
@@ -425,6 +446,55 @@ mod tests {
             events.extend(engine.step().unwrap().events);
         }
         panic!("steppable replay did not drain");
+    }
+
+    /// A cache flush is refused while a request is in flight. At idle it
+    /// drops prefix reuse and keeps the runtime.
+    #[test]
+    fn a_cache_flush_drops_prefix_reuse() {
+        let engine_config = ReplayEngineConfig {
+            rank: crate::engine::EngineConfig {
+                enable_prefix_caching: true,
+                ..crate::engine::EngineConfig::for_backend(crate::engine::Backend::Sglang)
+            },
+            ..ReplayEngineConfig::default()
+        };
+        let mut engine = SteppableAgg::new(engine_config, &ReplayEngineFactory::new(), 1)
+            .expect("engine builds");
+        fn reused(engine: &mut dyn SteppableReplay, uuid: u128) -> usize {
+            let at = engine.now_ms();
+            engine
+                .submit(DirectRequest {
+                    arrival_timestamp_ms: Some(at),
+                    ..request(uuid, 256, 4)
+                })
+                .unwrap();
+            if uuid == 1 {
+                assert!(
+                    !engine.flush_cache().unwrap(),
+                    "flushed with a request in flight"
+                );
+            }
+            drain(engine);
+            engine.request_admission(Uuid::from_u128(uuid)).unwrap().1
+        }
+
+        assert_eq!(reused(&mut engine, 1), 0);
+        assert!(reused(&mut engine, 2) > 0, "the same prompt reused nothing");
+        assert!(
+            engine.flush_cache().unwrap(),
+            "an idle runtime refused a flush"
+        );
+        assert_eq!(reused(&mut engine, 3), 0, "a prefix survived the flush");
+    }
+
+    #[test]
+    fn a_cache_flush_is_sglang_only() {
+        let mut engine =
+            SteppableEngine::new(ReplayEngineConfig::default(), &ReplayEngineFactory::new())
+                .unwrap();
+        let error = engine.flush_cache().unwrap_err().to_string();
+        assert!(error.contains("SGLang"), "{error}");
     }
 
     #[test]

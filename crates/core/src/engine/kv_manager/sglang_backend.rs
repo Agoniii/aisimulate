@@ -1035,6 +1035,32 @@ impl SglangKvManager {
         self.log_trace("eviction", evicted);
     }
 
+    /// SGLang `flush_cache` on an idle rank: drop every cached page and return
+    /// the allocator to its initial state (`tree_cache.reset()` and
+    /// `token_to_kv_pool_allocator.clear()`). Like SGLang's reset, publish one
+    /// `Cleared` and no per-block removals.
+    pub(crate) fn flush_cache(&mut self) {
+        assert!(
+            self.pending_admission.is_none(),
+            "cache flush during a KV admission"
+        );
+        let cached = self.cache.evictable_size;
+        self.cache.reset();
+        self.page_to_block_hash.fill(None);
+        self.block_hash_refcounts.clear();
+        self.log_trace("flush", cached);
+        if !self.kv_event_publishers.is_empty() {
+            let event = KvEvent {
+                event_id: self.next_event_id,
+                data: KvEventData::Cleared,
+                dp_rank: self.dp_rank,
+                tier: KvEventTier::Device,
+            };
+            self.next_event_id += 1;
+            self.publish_event(event);
+        }
+    }
+
     fn free_pages(&mut self, pages: &[KvPageId]) {
         if pages.is_empty() {
             return;
@@ -1942,6 +1968,48 @@ mod tests {
             panic!("expected removed event");
         };
         assert_eq!(block_hashes.len(), 3);
+    }
+
+    /// A flush drops every cached page and publishes one `Cleared`, with no
+    /// per-block removals, as SGLang's reset records `AllBlocksCleared`, even
+    /// with nothing cached. Afterwards every page is free and a flushed block
+    /// is published again.
+    #[test]
+    fn flush_cache_publishes_one_cleared_and_frees_every_page() {
+        let sink = Arc::new(MockSink::new());
+        let mut mgr = SglangKvManager::new(100, 1, KvEventPublishers::new(Some(sink.clone())), 0);
+        for tokens in [[1, 2, 3], [1, 2, 4]] {
+            let r = mgr.allocate_for_request(&tokens).unwrap();
+            mgr.finish(&tokens, r.lease);
+        }
+        for _ in 0..2 {
+            let before = sink.clone_events();
+            mgr.flush_cache();
+            let events = sink.clone_events();
+            assert_eq!(
+                events.len(),
+                before.len() + 1,
+                "a flush publishes one event"
+            );
+            let flushed = events.last().unwrap();
+            assert_eq!(flushed.data, KvEventData::Cleared);
+            assert_eq!(flushed.event_id, before.last().unwrap().event_id + 1);
+            assert_eq!(mgr.cache().available_tokens(), mgr.cache().total_tokens());
+            assert_eq!(mgr.cache().evictable_size + mgr.cache().protected_size, 0);
+        }
+
+        let all: Vec<u32> = (1..=100).collect();
+        let r = mgr.allocate_for_request(&all).expect("every page is free");
+        assert_eq!(r.prefix_len, 0);
+        let events = sink.clone_events();
+        let KvEventData::Stored(store) = &events.last().unwrap().data else {
+            panic!("expected stored event");
+        };
+        assert_eq!(
+            store.blocks.len(),
+            100,
+            "a flushed block is published again"
+        );
     }
 
     #[test]

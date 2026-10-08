@@ -2789,6 +2789,28 @@ where
         Ok(Some(ReplayTerminalStatus::Canceled))
     }
 
+    /// SGLang `/flush_cache` on every worker at the current instant. Returns
+    /// false, changing nothing, unless the runtime is idle, as SGLang refuses
+    /// a flush while any request is queued or running. The flush's KV events
+    /// reach the placement policy now.
+    pub(crate) fn ensure_cache_flush_supported(&self) -> anyhow::Result<()> {
+        self.engine.ensure_cache_flush_supported()
+    }
+
+    pub(crate) fn flush_cache_dynamic(&mut self) -> anyhow::Result<bool> {
+        self.engine.ensure_cache_flush_supported()?;
+        if !self.is_workload_done() {
+            return Ok(false);
+        }
+        let Some(observations) = self.engine.flush_cache(self.now_ms)? else {
+            return Ok(false);
+        };
+        for events in observations {
+            self.apply_engine_observations(events, KvIngestBoundary::SchedulerCommand)?;
+        }
+        Ok(true)
+    }
+
     /// Completion-only slice of [`Self::drain_current_timestamp`]: settle every
     /// worker completion ready at the current instant without admitting
     /// arrivals or starting new passes.

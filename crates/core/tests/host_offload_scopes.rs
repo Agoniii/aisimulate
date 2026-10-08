@@ -592,7 +592,9 @@ fn an_engine_joining_a_warm_shared_pool_publishes_its_residency() {
         .filter(|event| event.tier == KvEventTier::HostPinned)
         .map(|event| match &event.data {
             KvEventData::Stored(stored) => stored.blocks.len(),
-            KvEventData::Removed { .. } => panic!("the snapshot only stores"),
+            KvEventData::Removed { .. } | KvEventData::Cleared => {
+                panic!("the snapshot only stores")
+            }
         })
         .sum::<usize>();
     assert_eq!(host_pinned_blocks, 2);

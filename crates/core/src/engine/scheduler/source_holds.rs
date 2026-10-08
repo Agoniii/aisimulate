@@ -40,6 +40,8 @@ pub enum SchedulerCommand {
     CancelDestination {
         handoff_id: HandoffId,
     },
+    /// SGLang `/flush_cache`; see [`crate::engine::Command::FlushCache`].
+    FlushCache,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

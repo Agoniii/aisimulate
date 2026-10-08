@@ -57,6 +57,11 @@ pub enum Command {
         request_id: Uuid,
         discard_pending_output: bool,
     },
+    /// SGLang's `/flush_cache`: drop every cached KV page and return the page
+    /// allocator to its initial state. Applied only when the rank is fully
+    /// idle; otherwise a no-op, as SGLang reports failure and changes nothing.
+    /// SGLang backend only.
+    FlushCache,
 }
 
 /// Result of applying a scheduler command.
@@ -128,6 +133,9 @@ pub enum KvEventData {
     Stored(StoredBlocks),
     /// The final physical copy of these hashes was evicted.
     Removed { block_hashes: Vec<u64> },
+    /// Every block this rank had published was dropped at once: SGLang's
+    /// `AllBlocksCleared`, recorded when a cache flush resets the radix tree.
+    Cleared,
 }
 
 /// Cache tier whose residency a [`KvEvent`] describes.

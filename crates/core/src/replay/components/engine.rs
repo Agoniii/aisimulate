@@ -753,6 +753,42 @@ where
         })
     }
 
+    /// Fail unless this component's backend models SGLang's cache flush.
+    pub(crate) fn ensure_cache_flush_supported(&self) -> Result<()> {
+        let backend = self.factory.backend();
+        anyhow::ensure!(
+            backend == crate::engine::Backend::Sglang,
+            "cache flush is modelled only for the SGLang backend, not {backend:?}"
+        );
+        Ok(())
+    }
+
+    /// SGLang `/flush_cache` on every scheduler of every live worker at
+    /// `now_ms`. Returns `None`, changing nothing, unless the component is
+    /// drained; otherwise each flushed scheduler's KV observations.
+    pub(crate) fn flush_cache(&mut self, now_ms: f64) -> Result<Option<Vec<Observation::Batch>>> {
+        self.ensure_cache_flush_supported()?;
+        if !self.is_drained() {
+            return Ok(None);
+        }
+        let scheduler_ids: Vec<usize> = self
+            .workers
+            .iter()
+            .flatten()
+            .flat_map(|worker| worker.scheduler_ids.iter().copied())
+            .collect();
+        let mut observations = Vec::with_capacity(scheduler_ids.len());
+        for scheduler_id in scheduler_ids {
+            let effects = self.apply_command(scheduler_id, Command::FlushCache, now_ms)?;
+            anyhow::ensure!(
+                matches!(effects.result, CommandResult::Applied),
+                "scheduler {scheduler_id} refused a cache flush in a drained component"
+            );
+            observations.push(effects.engine_events);
+        }
+        Ok(Some(observations))
+    }
+
     fn apply_request_accounting(
         &mut self,
         owner: SchedulerOwner,
@@ -2062,6 +2098,78 @@ mod tests {
                     .iter()
                     .any(|payload| !payload.engine_events.0.is_empty()),
                 "{backend:?} did not expose KV observations at pass completion"
+            );
+        }
+    }
+
+    /// A cache flush changes nothing while a request or pass is in flight. On
+    /// a drained SGLang component it returns one `Cleared` per scheduler,
+    /// through the same observation path as pass-completion events. vLLM
+    /// refuses it.
+    #[test]
+    fn sglang_cache_flush_publishes_one_cleared_per_scheduler_when_drained() {
+        let build = |backend| -> EngineComponent<KvEventObservation> {
+            let config = ReplayEngineConfig {
+                rank: EngineConfig {
+                    backend,
+                    num_gpu_blocks: 8,
+                    block_size: 4,
+                    timing_model: TimingModelConfig::Fixed {
+                        prefill_ms: 1.0,
+                        decode_ms: 1.0,
+                    },
+                    ..EngineConfig::for_backend(backend)
+                },
+                ..ReplayEngineConfig::default()
+            };
+            let factory = ReplayEngineFactory::new()
+                .role_factory(&config, WorkerStage::Aggregated, true)
+                .unwrap();
+            EngineComponent::new_with_factory(
+                SimulationWorkerStage::Aggregated,
+                EnginePassMode::Visible,
+                factory,
+                2,
+                None,
+            )
+            .unwrap()
+        };
+        assert!(build(Backend::Vllm).flush_cache(0.0).is_err());
+
+        let mut component = build(Backend::Sglang);
+        let request = DirectRequest {
+            tokens: vec![1; 4],
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(1)),
+            ..Default::default()
+        };
+        component.dispatch(0, request, 0.0).unwrap();
+        assert!(component.flush_cache(0.0).unwrap().is_none(), "queued");
+        let mut pass_start = component.drive_ready(0.0, None).unwrap();
+        let scheduled = pass_start
+            .scheduled_completion
+            .take()
+            .expect("fixed timing must schedule a completion");
+        assert!(component.flush_cache(0.0).unwrap().is_none(), "in a pass");
+        component
+            .on_scheduled_completion(scheduled.completion, scheduled.at_ms)
+            .unwrap();
+
+        let batches = component
+            .flush_cache(scheduled.at_ms)
+            .unwrap()
+            .expect("a drained component flushes");
+        assert_eq!(batches.len(), 2, "one observation per scheduler");
+        for batch in batches {
+            assert!(
+                matches!(
+                    batch.0.as_slice(),
+                    [KvEvent {
+                        data: crate::engine::KvEventData::Cleared,
+                        ..
+                    }]
+                ),
+                "{batch:?}"
             );
         }
     }

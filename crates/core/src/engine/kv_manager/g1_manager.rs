@@ -452,7 +452,7 @@ mod tests {
             .into_iter()
             .filter_map(|event| match event.data {
                 KvEventData::Stored(stored) => Some(stored),
-                KvEventData::Removed { .. } => None,
+                KvEventData::Removed { .. } | KvEventData::Cleared => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(stored.len(), 2);

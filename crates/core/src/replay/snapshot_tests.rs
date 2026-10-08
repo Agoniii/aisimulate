@@ -150,7 +150,7 @@ fn assert_native_prompt_hashes(
         .filter(|event| event.observed_at_ms < 1000.0)
         .filter_map(|event| match &event.event.data {
             KvEventData::Stored(stored) => Some(stored.blocks.iter()),
-            KvEventData::Removed { .. } => None,
+            KvEventData::Removed { .. } | KvEventData::Cleared => None,
         })
         .flatten()
         .collect::<Vec<_>>();

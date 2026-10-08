@@ -34,7 +34,7 @@ fn stored_hashes(events: &[KvEvent]) -> Vec<u64> {
                 .iter()
                 .map(|block| block.block_hash)
                 .collect::<Vec<_>>(),
-            KvEventData::Removed { .. } => Vec::new(),
+            KvEventData::Removed { .. } | KvEventData::Cleared => Vec::new(),
         })
         .collect()
 }
@@ -339,6 +339,33 @@ fn interval_idle_ratio_distinguishes_a_busy_peer_from_global_idle() {
     core.finish_group_pass(false, false);
     assert_eq!(core.new_token_ratio, core.config.init_new_token_ratio);
     assert!(core.is_drained());
+}
+
+/// A flush is refused, changing nothing, until the core is drained. Then it
+/// frees every page and leaves the admission ratio at its initial value, as
+/// SGLang's idle loop has done by the time a flush can succeed.
+#[test]
+fn cache_flush_needs_an_idle_core_and_restores_the_admission_ratio() {
+    let mut core = SglangCore::new(test_args(256, 1, 16));
+    core.receive(direct_request((1..=8).collect(), 4));
+    assert!(!core.flush_cache(), "flushed with a queued request");
+    assert_eq!(core.waiting.len(), 1);
+    for pass in 0..100 {
+        if core.is_empty() {
+            break;
+        }
+        core.execute_pass_internal(None, pass as f64);
+    }
+    assert!(core.is_drained());
+    let cache = core.kv_manager.cache();
+    assert!(cache.evictable_size > 0, "the request left nothing cached");
+    core.new_token_ratio = 0.4;
+
+    assert!(core.flush_cache());
+    assert_eq!(core.new_token_ratio, core.config.init_new_token_ratio);
+    let cache = core.kv_manager.cache();
+    assert_eq!(cache.available_tokens(), cache.total_tokens());
+    assert_eq!(cache.evictable_size + cache.protected_size, 0);
 }
 
 #[test]

@@ -790,7 +790,7 @@ impl ReplayEngineObservation for KvEventObservation {
                     .iter()
                     .map(|block| block.tokens_hash)
                     .collect::<Vec<_>>(),
-                KvEventData::Removed { .. } => Vec::new(),
+                KvEventData::Removed { .. } | KvEventData::Cleared => Vec::new(),
             })
             .collect()
     }

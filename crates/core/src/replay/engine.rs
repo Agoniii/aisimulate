@@ -480,7 +480,8 @@ impl ReplayEngineObservation for KvEventObservation {
             .filter(|event| event.tier == crate::engine::KvEventTier::Device)
             .flat_map(|event| match &event.data {
                 crate::engine::KvEventData::Stored(stored) => stored.blocks.as_slice(),
-                crate::engine::KvEventData::Removed { .. } => &[],
+                crate::engine::KvEventData::Removed { .. }
+                | crate::engine::KvEventData::Cleared => &[],
             })
             .map(|block| block.tokens_hash)
             .collect()
@@ -677,7 +678,7 @@ mod observation_tests {
                 .filter(|event| event.tier == KvEventTier::HostPinned)
                 .flat_map(|event| match &event.data {
                     KvEventData::Stored(stored) => stored.blocks.as_slice(),
-                    KvEventData::Removed { .. } => &[],
+                    KvEventData::Removed { .. } | KvEventData::Cleared => &[],
                 })
                 .map(|block| block.tokens_hash)
                 .collect::<Vec<_>>();

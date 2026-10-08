@@ -328,7 +328,7 @@ fn canonical_replay_reproduces_unplanned_output_tokens_and_kv_hashes() {
             .iter()
             .filter_map(|event| match &event.event.data {
                 KvEventData::Stored(stored) => Some(&stored.blocks),
-                KvEventData::Removed { .. } => None,
+                KvEventData::Removed { .. } | KvEventData::Cleared => None,
             })
             .flatten()
             .find(|block| block.token_ids.as_deref() == Some(output_block))

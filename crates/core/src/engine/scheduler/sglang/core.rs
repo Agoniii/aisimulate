@@ -259,6 +259,13 @@ impl SglangCore {
         allow_destination_admission: bool,
     ) -> anyhow::Result<SchedulerCommandEffects> {
         match command {
+            SchedulerCommand::FlushCache => {
+                Ok(SchedulerCommandEffects::new(if self.flush_cache() {
+                    SchedulerCommandResult::Applied
+                } else {
+                    SchedulerCommandResult::Noop
+                }))
+            }
             SchedulerCommand::Submit(mut request) => {
                 let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
                 request.uuid = Some(uuid);
@@ -640,6 +647,23 @@ impl SglangCore {
             && self.pending_destinations.is_empty()
             && self.destination_holds.is_empty()
             && self.active_destination_handoffs.is_empty()
+    }
+
+    /// SGLang 0.5.19 `Scheduler.flush_cache`: when fully idle, drop every
+    /// cached page and return the page allocator to its initial state;
+    /// otherwise change nothing and report failure.
+    pub(crate) fn flush_cache(&mut self) -> bool {
+        if !self.is_drained() {
+            return false;
+        }
+        self.kv_manager.flush_cache();
+        // Native flush leaves the admission ratio alone, but it succeeds only
+        // on a fully idle scheduler. Unless paused in place, that scheduler's
+        // loop has already reached on_idle(), which resets the ratio (see
+        // finish_group_pass). AIS does not step an idle engine, so the flush
+        // applies that reset.
+        self.new_token_ratio = self.config.init_new_token_ratio;
+        true
     }
 
     pub(crate) fn waiting_for_external_command(&self) -> bool {

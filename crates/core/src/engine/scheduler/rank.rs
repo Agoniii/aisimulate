@@ -140,6 +140,7 @@ impl SchedulerRank {
             Command::CancelDestination { handoff_id } => {
                 CoreCommand::CancelDestination { handoff_id }
             }
+            Command::FlushCache => CoreCommand::FlushCache,
         }
     }
 
@@ -173,6 +174,15 @@ impl RankEngine for SchedulerRank {
         context: CommandContext,
         pending_pass: Option<&mut Self::PendingPass>,
     ) -> Result<Self::CommandEffects> {
+        if matches!(command, Command::FlushCache) && context.pass_in_flight {
+            // A pass in flight still owns its batch, even after the core has
+            // released completed requests; SGLang flushes only when idle.
+            return map_command_effects(
+                CoreCommandEffects::new(CoreCommandResult::Noop),
+                self.metrics(),
+                false,
+            );
+        }
         let pending_suppression = pending_output_suppression(&command, &self.handoff_requests);
         let handoff_update = handoff_tracking_update(&command);
         let core_command = Self::core_command(command);
@@ -405,7 +415,9 @@ fn handoff_tracking_update(command: &Command) -> HandoffTrackingUpdate {
         Command::CancelRequest { request_id, .. } => {
             HandoffTrackingUpdate::RemoveRequest(*request_id)
         }
-        Command::Submit(_) | Command::ActivateDestination { .. } => HandoffTrackingUpdate::None,
+        Command::Submit(_) | Command::ActivateDestination { .. } | Command::FlushCache => {
+            HandoffTrackingUpdate::None
+        }
     }
 }
 

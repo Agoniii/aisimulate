@@ -1357,6 +1357,7 @@ mod tests {
                     stored.blocks.iter().map(|block| block.block_hash).collect(),
                 ),
                 KvEventData::Removed { block_hashes } => ("removed", block_hashes.clone()),
+                KvEventData::Cleared => ("cleared", Vec::new()),
             })
             .collect::<Vec<(&str, Vec<u64>)>>();
         assert_eq!(
@@ -1405,6 +1406,7 @@ mod tests {
                         stored.blocks.iter().map(|block| block.block_hash).collect(),
                     ),
                     KvEventData::Removed { block_hashes } => ("removed", block_hashes.clone()),
+                    KvEventData::Cleared => ("cleared", Vec::new()),
                 })
                 .collect::<Vec<(&str, Vec<u64>)>>()
         };
@@ -1638,7 +1640,9 @@ mod tests {
                     .iter()
                     .map(|block| block.block_hash)
                     .collect::<Vec<_>>(),
-                KvEventData::Removed { .. } => panic!("promotion evicts nothing"),
+                KvEventData::Removed { .. } | KvEventData::Cleared => {
+                    panic!("promotion evicts nothing")
+                }
             })
             .collect::<Vec<_>>();
         assert_eq!(host_pinned, vec![vec![key.sequence_hash()]]);

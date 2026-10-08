@@ -991,6 +991,30 @@ impl RadixCache {
         self.debug_assert_evictable_index();
     }
 
+    /// Return to a new cache's state with the same capacity and settings, as
+    /// SGLang's `RadixCache.reset()` and `token_to_kv_pool_allocator.clear()`
+    /// do. Cached pages are dropped; none may be locked or owned elsewhere.
+    pub(crate) fn reset(&mut self) {
+        assert_eq!(self.protected_size, 0, "radix reset with locked pages");
+        assert_eq!(
+            self.available_tokens() + self.evictable_size,
+            self.total_tokens(),
+            "radix reset with pages outside the cache"
+        );
+        let mut fresh = Self::new(self.total_tokens(), self.page_size);
+        #[cfg(test)]
+        {
+            fresh.test_now = self.test_now;
+        }
+        if let Some(belady) = self.belady.take() {
+            fresh.set_belady_oracle(belady.oracle);
+            if let Some(fresh_belady) = fresh.belady.as_mut() {
+                fresh_belady.cursor = belady.cursor;
+            }
+        }
+        *self = fresh;
+    }
+
     /// Evict eligible leaf pages using the selected policy, rounding to full pages.
     /// Returns `(num_tokens_evicted, evicted_page_ids)`.
     pub fn evict(&mut self, num_tokens: usize) -> (usize, Vec<KvPageId>) {
