@@ -34,7 +34,24 @@ def _ref(path):
 
 
 @pytest.fixture
-def split_collection(tmp_path, capsys, request, monkeypatch):
+def source_revisions(request, monkeypatch):
+    from . import test_onboard_runtime
+
+    revisions = getattr(request, "param", (None, None))
+    observation_fixture = test_onboard_runtime.observation_fixture
+
+    def with_revision(*args, **kwargs):
+        index, launches = observation_fixture(*args, **kwargs)
+        if revisions[0] is not None:
+            launches["tp2"]["identity"]["aisimulate_revision"] = revisions[0]
+        return index, launches
+
+    monkeypatch.setattr(test_onboard_runtime, "observation_fixture", with_revision)
+    return revisions
+
+
+@pytest.fixture
+def split_collection(tmp_path, capsys, request, monkeypatch, source_revisions):
     if getattr(request, "param", None) is not None:
         from aisimulate_core.sdk import fpm_profile
 
@@ -63,6 +80,9 @@ def split_collection(tmp_path, capsys, request, monkeypatch):
         attempt["phases"] = {phase: attempt["phases"][phase]}
         launch = entry["launch"]
         launch["deployment"]["cpus_per_task"] = 32
+        launch["identity"].pop("aisimulate_revision", None)
+        if source_revisions[1] is not None:
+            launch["identity"]["aisimulate_revision"] = source_revisions[1]
         bundle_path = observations.parent / attempt["bundle"]["manifest"]
         manifest = json.loads(bundle_path.read_text())
         manifest["runtime"]["source_files"]["vllm/v1/core/block_pool.py"] = ("d" if phase == "prefill" else "e") * 64
@@ -76,6 +96,7 @@ def split_collection(tmp_path, capsys, request, monkeypatch):
                 record = json.loads(path.read_text())
                 record.update(configuration=name, attempt_id=attempt_id, launch=launch, bundle_sha256=bundle.sha256)
                 if ref.get("kind") == "observation":
+                    record["identity"] = launch["identity"]
                     record["runtime"] = {**manifest["runtime"], "image": launch["deployment"]["image"]}
                 _write(path, record)
                 ref["sha256"] = _ref(path)["sha256"]
@@ -157,6 +178,48 @@ def test_renamed_split_collection_requires_exact_review_and_keeps_attempts(split
     assert all(_ref(Path(path))["sha256"] == digest for path, digest in inputs.items())
     with pytest.raises(ValueError, match="incomplete"):
         runtime.verify_collection_runtime(request, Path(bindings[0]["observations"]["path"]))
+
+
+@pytest.mark.parametrize(
+    "source_revisions",
+    [("1" * 40, "2" * 40), (None, "2" * 40), ("1" * 40, None)],
+    indirect=True,
+)
+def test_aisimulate_source_revision_requires_exact_review_and_preserves_provenance(split_collection, source_revisions):
+    request, bindings = split_collection
+    original_request = request.model_dump(mode="json")
+    original_source = runtime.verify_runtime_profile(request)
+    expected = {
+        "field": "/identity/aisimulate_revision",
+        "accepted": source_revisions[0] if source_revisions[0] is not None else {"missing": True},
+        "collection": source_revisions[1] if source_revisions[1] is not None else {"missing": True},
+    }
+    for binding in bindings:
+        review = runtime.collection_runtime_review(request, binding)
+        assert expected in review["changes"]
+        assert review["collector_revision"] == "reviewed-collector-revision"
+    with pytest.raises(ValueError, match="exact runtime change review required"):
+        runtime.verify_collection_runtime_plans(request, bindings)
+    _review(request, bindings)
+    for change in ("missing", "accepted", "collection"):
+        stale = copy.deepcopy(bindings)
+        changes = stale[0]["review"]["changes"]
+        entry = next(item for item in changes if item["field"] == expected["field"])
+        if change == "missing":
+            changes.remove(entry)
+        else:
+            entry[change] = "unreviewed-revision"
+        with pytest.raises(ValueError, match="exact runtime change review required"):
+            runtime.verify_collection_runtime_bindings(request, stale)
+    assert runtime.verify_collection_runtime_plans(request, bindings)["status"] == "verified"
+    result = runtime.verify_collection_runtime_bindings(request, bindings)
+    assert result["compatibility"]["status"] == "compatible"
+    for phase in result["phases"].values():
+        identity = phase["provenance"]["launch"]["identity"]
+        assert identity.get("aisimulate_revision", {"missing": True}) == expected["collection"]
+        assert expected in phase["binding"]["review"]["changes"]
+    assert request.model_dump(mode="json") == original_request
+    assert runtime.verify_runtime_profile(request) == original_source
 
 
 def _change_index(binding, change):
@@ -325,6 +388,7 @@ def test_raw_evidence_is_independently_validated_under_each_frozen_launch(split_
     [
         ("identity", "model", "other/model"),
         ("identity", "model_revision", "another-revision"),
+        ("identity", "framework_version", "0.29.0"),
         ("topology", "tp", 4),
         ("precision", "gemm_quant_mode", "fp8"),
         ("collection", "max_num_seqs", 32),

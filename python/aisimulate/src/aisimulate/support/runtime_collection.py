@@ -81,6 +81,8 @@ def _plan(request: SupportRequest, binding: dict[str, Any], source: dict[str, An
     expected, actual = deepcopy(original), deepcopy(launch)
     for value in (expected, actual):
         value.pop("deployment")
+        # AISimulate source provenance is reviewed below, separately from the checkpoint.
+        value["identity"].pop("aisimulate_revision", None)
         value["model_config"].pop("path")
         value["model_config"].setdefault("source_files", {})
     if actual != expected:
@@ -116,8 +118,14 @@ def _plan(request: SupportRequest, binding: dict[str, Any], source: dict[str, An
                 "bundle_sha256": source["provenance"]["bundle_sha256"],
                 "runtime": source["provenance"]["runtime"],
                 "deployment": original["deployment"],
+                "identity": original["identity"],
             },
-            {"bundle_sha256": bundle.sha256, "runtime": bundle.manifest["runtime"], "deployment": launch["deployment"]},
+            {
+                "bundle_sha256": bundle.sha256,
+                "runtime": bundle.manifest["runtime"],
+                "deployment": launch["deployment"],
+                "identity": launch["identity"],
+            },
         ),
     }
     return path, plan, cells[0], bundle, reviewed
