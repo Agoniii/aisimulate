@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +61,93 @@ def _source(request: SupportRequest) -> dict[str, Any]:
     return source
 
 
+def _collection_controls(cells, deployment):
+    """Separate recorded collection controls for memory-only review, without editing plans."""
+    from collector.fpm_forward.planner import BackendPolicy
+
+    from aisimulate.generator.builders.fpm_builder import _benchmark_wait_timeout_seconds
+
+    compared_cells, changes = [], []
+    for cell in cells:
+        policy = cell.backend_policy.to_dict()
+        overrides = policy["generator_overrides"]
+        params = overrides.get("params", {})
+        agg = params.get("agg", {})
+        args = agg.get("extra_cli_args", [])
+        if not isinstance(args, list) or any(not isinstance(token, str) for token in args):
+            raise ValueError("collection policy extra_cli_args must be a list of strings")
+        remaining, deadline = [], []
+        index = 0
+        while index < len(args):
+            token = args[index]
+            if token == "--benchmark-timeout" or token.startswith("--benchmark-timeout="):
+                if deadline:
+                    raise ValueError("collection policy contains duplicate --benchmark-timeout controls")
+                width = 2 if token == "--benchmark-timeout" else 1
+                deadline = args[index : index + width]
+                _benchmark_wait_timeout_seconds(deadline)
+                index += width
+            else:
+                remaining.append(token)
+                index += 1
+        if "extra_cli_args" in agg:
+            agg["extra_cli_args"] = remaining
+            if not remaining:
+                del agg["extra_cli_args"]
+                if not agg:
+                    params.pop("agg")
+                if not params:
+                    overrides.pop("params")
+        compared_cells.append(replace(cell, backend_policy=BackendPolicy(**policy)))
+        changes.extend(_differences([], deadline, f"/collection_controls/{cell.workload_kind}/benchmark_timeout"))
+
+    deployment = deepcopy(deployment)
+    k8s = deployment.get("K8sConfig", {})
+    environment = k8s.get("extra_env", [])
+    known = {
+        "DYN_BENCH_CONTENT_SEED",
+        "DYN_BENCH_PREFILL_CONTENT",
+        "DYN_BENCH_POOL_TAG",
+        "DYN_BENCH_GIANT_KV_THRESHOLD",
+        "DYN_BENCH_GIANT_KV_REPEATS",
+        "DYN_FORWARDPASS_METRIC_PORT",
+        "FPM_RESULT_WAIT_TIMEOUT_SECONDS",
+    }
+    retained, seen = [], set()
+    if not isinstance(environment, list):
+        raise ValueError("collection environment must be a list")
+    for item in environment:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ValueError("collection environment requires named entries")
+        name = item["name"]
+        if name not in known:
+            retained.append(item)
+            continue
+        value = item.get("value")
+        if (
+            name in seen
+            or set(item) != {"name", "value"}
+            or not isinstance(value, str)
+            or any(ord(char) < 32 for char in value)
+        ):
+            raise ValueError(f"collection control {name} requires one literal string value")
+        seen.add(name)
+        if name == "DYN_BENCH_PREFILL_CONTENT" and value not in {"random", "sharegpt", "sharegpt_chain", "zeros"}:
+            raise ValueError(f"collection control {name} has an unsupported content mode")
+        if name in {"DYN_BENCH_GIANT_KV_THRESHOLD", "DYN_BENCH_GIANT_KV_REPEATS"} and not re.fullmatch(
+            r"0|[1-9][0-9]*", value
+        ):
+            raise ValueError(f"collection control {name} must be a nonnegative integer")
+        if name in {"DYN_FORWARDPASS_METRIC_PORT", "FPM_RESULT_WAIT_TIMEOUT_SECONDS"}:
+            maximum = 65535 if name == "DYN_FORWARDPASS_METRIC_PORT" else 43200
+            if not re.fullmatch(r"[1-9][0-9]*", value) or int(value) > maximum:
+                raise ValueError(f"collection control {name} must be an integer from 1 through {maximum}")
+        changes.extend(_differences({"missing": True}, value, "/collection_controls/environment/" + name))
+    if "extra_env" in k8s:
+        k8s["extra_env"] = retained
+    return tuple(compared_cells), deployment, changes
+
+
 def _plan(request: SupportRequest, binding: dict[str, Any], source: dict[str, Any]):
     from collector.fpm_forward.repeatability import load_repeatability_deployment, load_repeatability_source
     from collector.fpm_forward.runtime_probe import validate_collection_probe_launch
@@ -95,6 +184,7 @@ def _plan(request: SupportRequest, binding: dict[str, Any], source: dict[str, An
         raise ValueError("bound phase requires exactly one matching frozen collection cell")
     bundle = plan.runtime_instrumentation
     deployment = load_repeatability_deployment(path.parent)
+    compared_cells, compared_deployment, controls = _collection_controls(plan.cells, deployment)
     validate_collection_probe_launch(
         launch,
         bundle,
@@ -102,10 +192,10 @@ def _plan(request: SupportRequest, binding: dict[str, Any], source: dict[str, An
         system=plan.system,
         backend=plan.backend,
         backend_version=plan.capability.aic_database_version,
-        cells=plan.cells,
+        cells=compared_cells,
         options=plan.options,
         profile=plan.fpm_profile,
-        generator_overrides=deployment,
+        generator_overrides=compared_deployment,
         phases=tuple(cell.workload_kind for cell in plan.cells),
     )
     reviewed = {
@@ -128,6 +218,7 @@ def _plan(request: SupportRequest, binding: dict[str, Any], source: dict[str, An
             },
         ),
     }
+    reviewed["changes"] = sorted([*reviewed["changes"], *controls], key=lambda item: item["field"])
     return path, plan, cells[0], bundle, reviewed
 
 
@@ -313,6 +404,8 @@ def verify_collection_runtime_bindings(request: SupportRequest, bindings: list[d
         "inputs": list({ref["path"]: ref for ref in inputs}.values()),
         "compatibility": {
             "status": "compatible",
+            "scope": "memory compatibility only; collection-control review does not establish "
+            "timing or measurement equivalence",
             "accepted_capacity_bytes": bound,
             "observed_capacity_bytes": capacity,
             "source_observations_index": manifest["observations_index"],

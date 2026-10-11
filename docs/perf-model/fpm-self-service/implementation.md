@@ -1267,7 +1267,7 @@ The campaign recorder supplies a list with exactly one binding per phase require
 | --- | --- |
 | `phase` | `prefill` or `decode`, present in the selected frozen plan. Aggregated requests require both, even when their attempts differ. |
 | `plan` | `{ "path": ".../collection-plan.json", "sha256": "..." }`. This digest is the producer's semantic plan SHA, independently recomputed from its immutable inputs. The plan supplies the recorded configuration, launch, bundle and unique phase cell. |
-| `review` | Required when runtime, instrumentation, AISimulate source revision or deployment differs from the accepted probe. Exact review record described below; no wildcard or mismatch bypass exists. |
+| `review` | Required when runtime, instrumentation, AISimulate source revision, deployment or supported collection controls differ from the accepted probe. Exact review record described below; no wildcard or mismatch bypass exists. |
 | `checkpoint` | `{ "path": ".../fpm_forward.json", "sha256": "..." }`, with the byte SHA of the completed collector checkpoint. |
 | `observations` | `{ "path": ".../runtime-observations.json", "sha256": "..." }`, with the byte SHA of the immutable observation index inside that plan's campaign directory. |
 | `attempt_id` | The index's active runtime observation attempt, also recorded in the checkpoint. |
@@ -1278,6 +1278,19 @@ Before GPU work, pass bindings containing `phase`, `plan` and any `review` to `v
 The `expected_plan` and `runtime_bindings` arguments are mutually exclusive; passing both raises `ValueError`.
 
 To inspect a changed runtime, `collection_runtime_review(request, binding)` returns its exact accepted/collection bundle hashes, collector revision, generator configuration hash, and complete sorted `changes` of `{field, accepted, collection}` for runtime source/build metadata, launch `identity.aisimulate_revision` and deployment settings. Absent values are represented as `{ "missing": true }`. `collector_revision` remains the frozen plan's `aic_revision`; each launch retains its own recorded AISimulate source revision. Inspect the actual source changes, including scheduler patches, mounts and CPU policy, and save this record with a nonempty `rationale` in `review`. Computing that record alone is not a compatibility verdict. Verification recomputes it and rejects missing, altered or stale expectations. Equal cache capacity cannot authorize an unreviewed source change, and reviewed source changes cannot override incompatible model, precision, scheduler, graph or cache properties.
+
+Explicit bindings also review these archived collection controls under `/collection_controls`, preserving their exact values and the original plan and generator hashes:
+
+| Control | Validation and review scope |
+| --- | --- |
+| Backend-policy `params.agg.extra_cli_args` option `--benchmark-timeout` | One positive integer deadline, in split or `=value` form. The exact argument tokens are recorded; `[]` means the probe declared no override. Duplicate, conflicting or malformed options fail. An explicitly empty argument list is equivalent to no policy override for comparison. |
+| `K8sConfig.extra_env.FPM_RESULT_WAIT_TIMEOUT_SECONDS` | One literal integer from 1 through 43,200 seconds for the outer result wait. This checks an archived control; it does not change current rendering or transport limits. |
+| `DYN_BENCH_CONTENT_SEED`, `DYN_BENCH_POOL_TAG` | Literal strings, including an empty pool tag. |
+| `DYN_BENCH_PREFILL_CONTENT` | `random`, `sharegpt`, `sharegpt_chain` or `zeros`. |
+| `DYN_BENCH_GIANT_KV_THRESHOLD`, `DYN_BENCH_GIANT_KV_REPEATS` | Literal nonnegative integers. |
+| `DYN_FORWARDPASS_METRIC_PORT` | Literal integer from 1 through 65,535. |
+
+The environment controls above must each appear at most once as an exact `{name, value}` entry. Their absence from the probe is recorded as `{ "missing": true }`, without inferring a historical default. All remaining backend policy and deployment fields pass the strict launch comparison, including `DYN_BENCH_KV_WARMUP` and `DYN_BENCH_PREFILL_REAL_SEED`; unknown CLI or environment overrides fail. Collection-control review authorizes only a memory compatibility comparison. It does not establish timing or measurement equivalence: preserve the original source artifacts and independently require the ordinary timing, measurement-quality and repeatability checks. No archived policy or request is rewritten.
 
 Each phase is independently checked under its own frozen launch and instrumentation, including artifact containment and hashes, worker/scheduler ranks, tensor geometry and physical capacity. The serving role qualifies only after every required phase passes against the same accepted profile. A Hugging Face repository name and its exact local snapshot spelling can compare as the same model only after their immutable revision, configuration hash and sidecar hashes agree and each observed spelling independently passes the checkpoint-path validator. The report retains those spelling differences and original runtime settings. Other effective settings and geometry remain exact; every phase/rank must provide at least the accepted usable capacity.
 

@@ -14,7 +14,9 @@ from pathlib import Path
 
 import pytest
 from collector.fpm_forward.cli import _parser
+from collector.fpm_forward.config import with_kv_warmup_defaults
 from collector.fpm_forward.entry import _load_generator_overrides
+from collector.fpm_forward.planner import BackendPolicy, _canonical_hash
 from collector.fpm_forward.repeatability import _subset_plan, load_repeatability_source
 from collector.fpm_forward.runtime_instrumentation import load_instrumentation
 
@@ -141,6 +143,225 @@ def _review(request, bindings):
             **runtime.collection_runtime_review(request, binding),
             "rationale": "Synthetic regression: reviewed CPU allocation and phase-specific source changes.",
         }
+
+
+@pytest.fixture
+def archived_controls(split_collection, request):
+    support_request, bindings = split_collection
+    controls = getattr(
+        request,
+        "param",
+        {
+            "extra_cli_args": ["--benchmark-timeout", "12600"],
+            "extra_env": [
+                {"name": "DYN_BENCH_CONTENT_SEED", "value": "0"},
+                {"name": "DYN_BENCH_PREFILL_CONTENT", "value": "random"},
+                {"name": "DYN_BENCH_POOL_TAG", "value": ""},
+                {"name": "DYN_BENCH_GIANT_KV_THRESHOLD", "value": "1000000"},
+                {"name": "DYN_BENCH_GIANT_KV_REPEATS", "value": "3"},
+                {"name": "DYN_FORWARDPASS_METRIC_PORT", "value": "7020"},
+                {"name": "FPM_RESULT_WAIT_TIMEOUT_SECONDS", "value": "14100"},
+            ],
+        },
+    )
+    binding = bindings[0]
+    path = Path(binding["plan"]["path"])
+    plan = load_repeatability_source(path.parent)
+    policy = plan.cells[0].backend_policy.to_dict()
+    policy["generator_overrides"].setdefault("params", {}).setdefault("agg", {})["extra_cli_args"] = controls[
+        "extra_cli_args"
+    ]
+    policy = BackendPolicy(**policy)
+    deployment_path = path.parent / "generator-overrides.json"
+    deployment = json.loads(deployment_path.read_text())
+    deployment.setdefault("K8sConfig", {}).setdefault("extra_env", []).extend(controls.get("extra_env", []))
+    _write(deployment_path, deployment)
+    plan = replace(
+        plan,
+        cells=(replace(plan.cells[0], backend_policy=policy),),
+        backend_policies=(policy,),
+        generator_config_sha256=_canonical_hash(with_kv_warmup_defaults(deployment)),
+    )
+    plan = _subset_plan(plan, {"cell_id": plan.cells[0].cell_id, "benchmark_points": {}}, comparison_mode="full_grid")
+    _write(path, plan.to_dict())
+    binding["plan"]["sha256"] = plan.sha256
+    checkpoint_path = Path(binding["checkpoint"]["path"])
+    checkpoint = json.loads(checkpoint_path.read_text())
+    checkpoint["plan_sha256"] = plan.sha256
+    _write(checkpoint_path, checkpoint)
+    binding["checkpoint"] = _ref(checkpoint_path)
+    # Reload the archived representation through the real hash validation path.
+    assert load_repeatability_source(path.parent).sha256 == plan.sha256
+    return support_request, bindings
+
+
+def test_archived_collection_controls_require_exact_review_and_preserve_plan(archived_controls):
+    request, bindings = archived_controls
+    original_request = request.model_dump(mode="json")
+    original_source = runtime.verify_runtime_profile(request)
+    archived = {
+        path: path.read_bytes()
+        for binding in bindings
+        for path in Path(binding["plan"]["path"]).parent.rglob("*")
+        if path.is_file()
+    }
+    changes = [
+        {
+            "field": "/collection_controls/prefill/benchmark_timeout",
+            "accepted": [],
+            "collection": ["--benchmark-timeout", "12600"],
+        },
+        *[
+            {
+                "field": "/collection_controls/environment/" + name,
+                "accepted": {"missing": True},
+                "collection": value,
+            }
+            for name, value in {
+                "DYN_BENCH_CONTENT_SEED": "0",
+                "DYN_BENCH_PREFILL_CONTENT": "random",
+                "DYN_BENCH_POOL_TAG": "",
+                "DYN_BENCH_GIANT_KV_THRESHOLD": "1000000",
+                "DYN_BENCH_GIANT_KV_REPEATS": "3",
+                "DYN_FORWARDPASS_METRIC_PORT": "7020",
+                "FPM_RESULT_WAIT_TIMEOUT_SECONDS": "14100",
+            }.items()
+        ],
+    ]
+    review = runtime.collection_runtime_review(request, bindings[0])
+    assert all(change in review["changes"] for change in changes)
+    with pytest.raises(ValueError, match="exact runtime change review required"):
+        runtime.verify_collection_runtime_plans(request, bindings)
+    _review(request, bindings)
+    for field in (change["field"] for change in changes):
+        for mutation in ("missing", "accepted", "collection"):
+            stale = copy.deepcopy(bindings)
+            entries = stale[0]["review"]["changes"]
+            entry = next(item for item in entries if item["field"] == field)
+            if mutation == "missing":
+                entries.remove(entry)
+            else:
+                entry[mutation] = ["unreviewed-timeout"]
+            with pytest.raises(ValueError, match="exact runtime change review required"):
+                runtime.verify_collection_runtime_bindings(request, stale)
+    assert runtime.verify_collection_runtime_plans(request, bindings)["status"] == "verified"
+    result = runtime.verify_collection_runtime_bindings(request, bindings)
+    assert result["compatibility"]["status"] == "compatible"
+    assert "timing or measurement equivalence" in result["compatibility"]["scope"]
+    assert result["phases"]["prefill"]["binding"] == bindings[0]
+    assert all(path.read_bytes() == contents for path, contents in archived.items())
+    assert request.model_dump(mode="json") == original_request
+    assert runtime.verify_runtime_profile(request) == original_source
+
+
+@pytest.mark.parametrize(
+    "archived_controls",
+    [{"extra_cli_args": []}, {"extra_cli_args": ["--benchmark-timeout=12600"]}],
+    indirect=True,
+)
+def test_archived_empty_policy_and_equals_deadline_are_explicitly_verified(archived_controls):
+    request, bindings = archived_controls
+    _review(request, bindings)
+    assert runtime.verify_collection_runtime_bindings(request, bindings)["status"] == "complete"
+
+
+@pytest.mark.parametrize(
+    "archived_controls",
+    [
+        {"extra_cli_args": args}
+        for args in (
+            ["--benchmark-timeout"],
+            ["--benchmark-timeout", ""],
+            ["--benchmark-timeout", "0"],
+            ["--benchmark-timeout=-1"],
+            ["--benchmark-timeout", "1.5"],
+            ["--benchmark-timeout", 12600],
+            ["--benchmark-timeout 12600"],
+            ["--benchmark-timeout", "12600", "--benchmark-timeout=12600"],
+            ["--benchmark-timeout", "12600", "--benchmark-timeout=10800"],
+            ["--benchmark-timeout", "12600", "--unknown-option", "1"],
+            ["--benchmark-timeout", "12600", "--max-num-seqs", "32"],
+            ["--benchmark-timeout", "12600", "--enforce-eager"],
+            ["--benchmark-timeout", "12600", "--kv-cache-dtype", "fp8"],
+        )
+    ]
+    + [
+        {
+            "extra_cli_args": ["--benchmark-timeout", "12600"],
+            "extra_env": [{"name": "FPM_RESULT_WAIT_TIMEOUT_SECONDS", "value": value}],
+        }
+        for value in (None, 14100, True, "", "0", "43201", "1.5", "-1", " 14100", "${TIMEOUT}")
+    ]
+    + [
+        {
+            "extra_cli_args": ["--benchmark-timeout", "12600"],
+            "extra_env": [
+                {"name": "FPM_RESULT_WAIT_TIMEOUT_SECONDS", "value": "14100"},
+                {"name": "FPM_RESULT_WAIT_TIMEOUT_SECONDS", "value": value},
+            ],
+        }
+        for value in ("14100", "14000")
+    ]
+    + [
+        {"extra_cli_args": [], "extra_env": [{"name": name, "value": "off"}]}
+        for name in (
+            "UNKNOWN_CONTROL",
+            "DYN_BENCH_PREFILL_CONTENT",
+            "DYN_BENCH_KV_WARMUP",
+            "DYN_BENCH_PREFILL_REAL_SEED",
+            "VLLM_ATTENTION_BACKEND",
+        )
+    ]
+    + [
+        {"extra_cli_args": [], "extra_env": [{"name": name, "value": value}]}
+        for name, value in (
+            ("DYN_BENCH_CONTENT_SEED", "seed\nchanged"),
+            ("DYN_BENCH_POOL_TAG", None),
+            ("DYN_BENCH_GIANT_KV_THRESHOLD", "-1"),
+            ("DYN_BENCH_GIANT_KV_REPEATS", "1.5"),
+            ("DYN_FORWARDPASS_METRIC_PORT", "0"),
+            ("DYN_FORWARDPASS_METRIC_PORT", "65536"),
+        )
+    ]
+    + [
+        {
+            "extra_cli_args": [],
+            "extra_env": [{"name": "DYN_BENCH_CONTENT_SEED", "value": "0"}] * 2,
+        },
+        {
+            "extra_cli_args": [],
+            "extra_env": [{"name": "DYN_BENCH_POOL_TAG", "value": "", "valueFrom": "unreviewed"}],
+        },
+    ],
+    indirect=True,
+)
+def test_archived_controls_reject_malformed_deadlines_and_serving_changes(archived_controls):
+    request, bindings = archived_controls
+    with pytest.raises(ValueError):
+        runtime.collection_runtime_review(request, bindings[0])
+
+
+def test_legacy_launch_validation_remains_strict_on_collection_controls(archived_controls):
+    from collector.fpm_forward.repeatability import load_repeatability_deployment
+    from collector.fpm_forward.runtime_probe import validate_collection_probe_launch
+
+    _, bindings = archived_controls
+    directory = Path(bindings[0]["plan"]["path"]).parent
+    plan = load_repeatability_source(directory)
+    with pytest.raises(ValueError, match="topology or precision differs"):
+        validate_collection_probe_launch(
+            plan.runtime_launch,
+            plan.runtime_instrumentation,
+            model_path=plan.model_path,
+            system=plan.system,
+            backend=plan.backend,
+            backend_version=plan.capability.aic_database_version,
+            cells=plan.cells,
+            options=plan.options,
+            profile=plan.fpm_profile,
+            generator_overrides=load_repeatability_deployment(directory),
+            phases=("prefill",),
+        )
 
 
 def test_renamed_split_collection_requires_exact_review_and_keeps_attempts(split_collection):
@@ -292,6 +513,7 @@ def test_explicit_phase_plan_attempt_and_review_bindings_are_required(split_coll
         runtime.verify_collection_runtime_bindings(request, bindings)
 
 
+@pytest.mark.parametrize("collection", ["split_collection", "archived_controls"])
 @pytest.mark.parametrize(
     "change",
     [
@@ -312,8 +534,8 @@ def test_explicit_phase_plan_attempt_and_review_bindings_are_required(split_coll
         "capacity",
     ],
 )
-def test_raw_evidence_is_independently_validated_under_each_frozen_launch(split_collection, change):
-    request, bindings = split_collection
+def test_raw_evidence_is_independently_validated_under_each_frozen_launch(request, collection, change):
+    request, bindings = request.getfixturevalue(collection)
     _review(request, bindings)
     binding = bindings[0]
     if change in {"missing-rank", "duplicate-rank", "artifact-bytes", "artifact-escape", "launch-attempt"}:
