@@ -381,6 +381,30 @@ def test_readiness_uses_phase_bound_memory_and_keeps_native_timing_failures(spli
     assert "runtime checkpoint" in " ".join(report["blockers"])
 
 
+@pytest.mark.parametrize("conflicting_plan", [False, True])
+def test_readiness_rejects_expected_plan_with_explicit_bindings(split_collection, monkeypatch, conflicting_plan):
+    from aisimulate.support import collection_readiness
+
+    request, bindings = split_collection
+    _review(request, bindings)
+    expected_plan = load_repeatability_source(Path(bindings[0]["plan"]["path"]).parent)
+    if conflicting_plan:
+        expected_plan = replace(expected_plan, sha256="0" * 64)
+    monkeypatch.setattr(
+        collection_readiness,
+        "_cell_report",
+        lambda plan, cell, campaign, entry: {"status": "ready", "blockers": [], "cell": cell.to_dict()},
+    )
+    with pytest.raises(ValueError, match="expected_plan and runtime_bindings are mutually exclusive"):
+        collection_readiness.assess_readiness(
+            request,
+            Path("unused"),
+            Path("unused"),
+            expected_plan=expected_plan,
+            runtime_bindings=bindings,
+        )
+
+
 @pytest.mark.parametrize("split_collection", ["example/model"], indirect=True)
 def test_exact_checkpoint_snapshot_spelling_preserves_full_settings_evidence(split_collection):
     request, bindings = split_collection
@@ -419,6 +443,17 @@ def test_default_readiness_requires_compatible_raw_memory_without_explicit_bindi
     report = collection_readiness.assess_readiness(request, root, root / "fpm-checkpoint")
     assert report["ready_for_full_collection"], report["blockers"]
     assert report["runtime_compatibility"]["compatibility"]["status"] == "compatible"
+    plan = load_repeatability_source(campaign)
+    report = collection_readiness.assess_readiness(request, root, root / "fpm-checkpoint", expected_plan=plan)
+    assert report["ready_for_full_collection"], report["blockers"]
+    report = collection_readiness.assess_readiness(
+        request,
+        root,
+        root / "fpm-checkpoint",
+        expected_plan=replace(plan, sha256="0" * 64),
+    )
+    assert not report["ready_for_full_collection"]
+    assert "current frozen runtime/launch plan" in " ".join(report["blockers"])
     binding = {"phase": "prefill", "observations": _ref(Path(checkpoint["runtime_observations"]))}
     _change_records(
         binding, lambda record: record["runtime"]["source_files"].update({"vllm/v1/core/block_pool.py": "0" * 64})

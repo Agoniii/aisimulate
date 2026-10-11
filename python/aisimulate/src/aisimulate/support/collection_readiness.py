@@ -239,6 +239,8 @@ def assess_readiness(
     from .runtime import runtime_probe_manifest, verify_collection_runtime_bindings
 
     if runtime_bindings is not None:
+        if expected_plan is not None:
+            raise ValueError("expected_plan and runtime_bindings are mutually exclusive")
         return _bound_readiness(request, runtime_bindings)
     campaigns = []
     selected = {}
