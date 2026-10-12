@@ -80,6 +80,16 @@ def test_program_admission_saved_config_preserves_affinity_and_policy_choices():
     assert policy["resume_timeout_seconds"] == 300
 
 
+def test_program_admission_supervised_preflight_is_prediction_only(monkeypatch):
+    from aisimulate import supervision
+
+    monkeypatch.setattr(supervision, "_installed_names", lambda _: [])
+    data = _program_admission_prediction()
+    supervision._require_known_sections(data, command="predict", stack="engine")
+    with pytest.raises(ValueError, match="unknown top-level section 'program_admission'"):
+        supervision._require_known_sections(data, command="recommend", stack="engine")
+
+
 @pytest.mark.parametrize("unsupported", ["pd", "speculation", "host_offload", "attention_dp", "startup"])
 def test_program_admission_rejects_unsupported_worker_combinations(unsupported):
     data = _program_admission_prediction()
