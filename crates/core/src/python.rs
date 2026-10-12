@@ -1730,7 +1730,11 @@ fn run_with_input(
         let replayer = match input {
             Some(input) => replayer.with_runtime_input(input),
             None => replayer,
-        };
+        }
+        .with_capture_options(ReplayCaptureOptions {
+            determinism,
+            ..ReplayCaptureOptions::default()
+        });
         return Ok((replayer.run()?, None));
     }
     let replayer = match input {
