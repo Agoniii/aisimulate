@@ -17,6 +17,11 @@ Construct production models through
 The initial topology is TP 1/2/4, MoE TP equal to attention TP,
 DP=PP=CP=EP=1, `nextn=0`, and full decoder execution. GB300 TP2/TP4 are the
 formal targets; TP1 acceptance requires measured allocator admission.
+NVFP4 TP1 has that admission on one GB300 (Mamba block size 8576), and its
+FPM and Ops data were collected. FP8 TP1 does not fit on one GB300: the
+native runtime runs out of memory while creating weights. The model accepts
+FP8 TP1, but its resident-weight inventory (about 298-299 GiB) already
+exceeds GB300's 277.5 GiB, so memory checks report it as out of memory.
 TensorRT-LLM fails explicitly. No new estimator constructor is introduced.
 
 The appended native variants are `Glm53Attention`, `Glm53Mhc`, and
