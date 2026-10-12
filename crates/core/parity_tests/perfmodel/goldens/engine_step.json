@@ -289,7 +289,7 @@
     "glm53flash-fp8-gb300-vllm-tp2-sol": {
       "mixed": {
         "values": {
-          "mixed_step": 37.865342045757444
+          "mixed_step": 38.66554914174061
         }
       },
       "static": {
@@ -303,7 +303,7 @@
     "glm53flash-nvfp4-gb300-sglang-tp4-sol": {
       "mixed": {
         "values": {
-          "mixed_step": 22.443503140350167
+          "mixed_step": 22.86994253562295
         }
       },
       "static": {
@@ -2047,7 +2047,7 @@
     },
     "glm53flash-fp8-gb300-vllm-tp2-sol::mixed": {
       "engine": "rust",
-      "git_head": "d2271085e02d00c7be811fc848fc36399a0195a2"
+      "git_head": "c793a22b2af7357d4a1319d37341bf118f98059c"
     },
     "glm53flash-fp8-gb300-vllm-tp2-sol::static": {
       "engine": "rust",
@@ -2055,7 +2055,7 @@
     },
     "glm53flash-nvfp4-gb300-sglang-tp4-sol::mixed": {
       "engine": "rust",
-      "git_head": "d2271085e02d00c7be811fc848fc36399a0195a2"
+      "git_head": "c793a22b2af7357d4a1319d37341bf118f98059c"
     },
     "glm53flash-nvfp4-gb300-sglang-tp4-sol::static": {
       "engine": "rust",

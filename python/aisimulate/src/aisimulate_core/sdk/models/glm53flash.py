@@ -22,6 +22,23 @@ def _native(kind: str, **values):
     return core.op_from_spec_json(json.dumps({kind: values}))
 
 
+def _checkpoint_format(quant) -> str:
+    """Match only the two pinned checkpoint quantization layouts."""
+    if not isinstance(quant, dict):
+        quant = {}
+    method = quant.get("quant_method")
+    # zai-org/GLM-5.3-Flash@eb9eb208: dynamic E4M3 with 128x128 weight blocks.
+    if method == "fp8" and quant.get("fmt") == "e4m3" and quant.get("weight_block_size") == [128, 128]:
+        return "fp8"
+    # nvidia/GLM-5.3-Flash-NVFP4@09b04e5e: ModelOpt NVFP4.
+    if method == "modelopt" and quant.get("quant_algo") == "NVFP4":
+        return "nvfp4"
+    raise NotImplementedError(
+        "GLM-5.3-Flash supports only the pinned FP8-block and ModelOpt NVFP4 checkpoint precisions; "
+        f"unsupported quantization_config (quant_method={method!r}, quant_algo={quant.get('quant_algo')!r})"
+    )
+
+
 def _specs(operations) -> list[dict]:
     return [json.loads(op._spec_json()) for op in operations]
 
@@ -94,6 +111,12 @@ class Glm53FlashModel(BaseModel):
             or model_config.attention_dp_size != 1
         ):
             raise NotImplementedError("GLM-5.3-Flash baseline requires TP1/2/4, MoE TP=TP, DP=PP=CP=EP=1")
+        # TP1 is accepted for both checkpoints, but only NVFP4 TP1 fits one
+        # GB300 (native runtime admitted it with Mamba block size 8576).
+        # FP8 TP1 runs out of memory while creating weights; the payload
+        # inventory below (about 298-299 GiB) already exceeds GB300's
+        # 277.5 GiB, so memory checks report OOM rather than this
+        # constructor rejecting it.
         if self._nextn or model_config.decoder_replay or self._num_layers != len(d.layer_types):
             raise NotImplementedError(
                 "GLM-5.3-Flash text baseline requires all45 layers, nextn=0 and no decoder replay"
@@ -105,8 +128,7 @@ class Glm53FlashModel(BaseModel):
         self.execution_profile = "full"
         self.input_modality = "text"
         self.model_revision = MODEL_REVISIONS.get(info["model_path"], "")
-        quant = self.raw_config["quantization_config"]
-        self.checkpoint_format = "nvfp4" if quant.get("quant_algo") == "NVFP4" else "fp8"
+        self.checkpoint_format = _checkpoint_format(self.raw_config.get("quantization_config"))
         expected = self.checkpoint_format if self.checkpoint_format == "nvfp4" else "fp8_block"
         if model_config.gemm_quant_mode.name != expected or model_config.moe_quant_mode.name != expected:
             raise NotImplementedError("GLM-5.3-Flash requires its checkpoint's native FP8/NVFP4 precision partition")

@@ -257,6 +257,19 @@ impl Glm53AttentionOp {
                 "GLM-5.3-Flash sparse MLA requires FP8 latent cache and IndexPool4/topk2048".into(),
             ));
         }
+        // Only SGLang keeps the FP8 checkpoint's block-quantized main sparse
+        // projections; vLLM and the NVFP4 checkpoint run them in BF16.
+        let sparse_projection = if self.backend == "sglang" && self.checkpoint_format == "fp8" {
+            GemmQuantMode::Fp8Block
+        } else {
+            GemmQuantMode::Bfloat16
+        };
+        if self.layer_kind == "sparse_mla" && self.projection_quant_mode != sparse_projection {
+            return Err(AicError::ModelConfig(format!(
+                "GLM-5.3-Flash {}/{} sparse MLA requires {:?} projections, got {:?}",
+                self.backend, self.checkpoint_format, sparse_projection, self.projection_quant_mode
+            )));
+        }
         if self.layer_kind == "sparse_mla" && !self.measured.is_empty() {
             return Err(AicError::ModelConfig(
                 "GLM-5.3-Flash sparse MLA is priced by its module table, not generic children"
@@ -1262,6 +1275,33 @@ pub(crate) mod tests {
             assert!((op_level - fpm).abs() <= 1e-9 * op_level, "t={t}");
             let routed = routed_moe_sol(&moe, &db.system_spec, x).unwrap().latency_ms;
             assert!(routed <= moe.query(&db, t).unwrap().latency_ms);
+        }
+    }
+    #[test]
+    fn sparse_mla_projection_precision_matches_backend_and_checkpoint() {
+        for backend in ["vllm", "sglang"] {
+            for checkpoint in ["fp8", "nvfp4"] {
+                let expected = if backend == "sglang" && checkpoint == "fp8" {
+                    GemmQuantMode::Fp8Block
+                } else {
+                    GemmQuantMode::Bfloat16
+                };
+                for quant in [GemmQuantMode::Bfloat16, GemmQuantMode::Fp8Block] {
+                    let mut op = attention("sparse_mla");
+                    op.backend = backend.into();
+                    op.checkpoint_format = checkpoint.into();
+                    op.projection_quant_mode = quant;
+                    let result = op.validate();
+                    if quant == expected {
+                        assert!(result.is_ok(), "{backend}/{checkpoint}/{quant:?}");
+                    } else {
+                        assert!(
+                            matches!(result, Err(AicError::ModelConfig(_))),
+                            "{backend}/{checkpoint}/{quant:?}"
+                        );
+                    }
+                }
+            }
         }
     }
     #[test]

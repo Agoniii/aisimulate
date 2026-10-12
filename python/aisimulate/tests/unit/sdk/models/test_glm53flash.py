@@ -5,14 +5,18 @@
 import json
 from collections import Counter
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
+import yaml
 
-from aisimulate_core.sdk import ForwardPassPerfModelConfig, RustForwardPassPerfModel, common
+import aisimulate_core
+from aisimulate_core.sdk import ForwardPassPerfModelConfig, RustForwardPassPerfModel, common, models
 from aisimulate_core.sdk.config import ModelConfig
 from aisimulate_core.sdk.errors import PerfDataNotAvailableError
 from aisimulate_core.sdk.glm53flash import MODEL_REVISIONS
 from aisimulate_core.sdk.models import get_model
+from aisimulate_core.sdk.models.glm53flash import _checkpoint_format
 from aisimulate_core.sdk.utils import get_model_config_from_model_path
 
 pytestmark = pytest.mark.unit
@@ -116,6 +120,57 @@ def test_unsupported_topology_and_precision_fail_explicitly():
         config = dict(info["raw_config"]["text_config"])
         config["layer_types"] = list(replace(info["extra_params"], layer_types=("linear_attention",) * 45).layer_types)
         type(info["extra_params"]).from_text_config(config)
+
+
+@pytest.mark.parametrize(("path", "fmt"), [("zai-org/GLM-5.3-Flash", "fp8"), ("nvidia/GLM-5.3-Flash-NVFP4", "nvfp4")])
+def test_pinned_checkpoint_quantization_layouts_are_recognized(path, fmt):
+    assert _checkpoint_format(get_model_config_from_model_path(path)["raw_config"]["quantization_config"]) == fmt
+    assert build(path).checkpoint_format == fmt
+
+
+@pytest.mark.parametrize(
+    "quant",
+    [
+        None,
+        {},
+        {"quant_method": "fp8", "fmt": "e4m3", "weight_block_size": [64, 64]},
+        {"quant_method": "fp8", "fmt": "e5m2", "weight_block_size": [128, 128]},
+        {"quant_method": "fp8", "fmt": "e4m3"},
+        {"quant_method": "modelopt", "quant_algo": "FP8"},
+        {"quant_method": "modelopt", "quant_algo": "W4A8_AWQ"},
+        {"quant_algo": "NVFP4"},
+        {"quant_method": "compressed-tensors"},
+    ],
+)
+def test_unpinned_checkpoint_quantization_fails_explicitly(monkeypatch, quant):
+    with pytest.raises(NotImplementedError, match="unsupported quantization_config"):
+        _checkpoint_format(quant)
+    path = "zai-org/GLM-5.3-Flash"
+    info = dict(models._get_model_info(path))
+    raw = {key: value for key, value in info["raw_config"].items() if key != "quantization_config"}
+    if quant is not None:
+        raw["quantization_config"] = quant
+    info["raw_config"] = raw
+    monkeypatch.setattr(models, "_get_model_info", lambda _: info)
+    with pytest.raises(NotImplementedError, match="unsupported quantization_config"):
+        build(
+            path,
+            gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+            moe_quant_mode=common.MoEQuantMode.fp8_block,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+        )
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_tp1_weight_inventory_matches_gb300_admission(backend):
+    # Measured: NVFP4 TP1 fits one GB300; FP8 TP1 runs out of memory while
+    # creating weights. The payload inventory alone places FP8 above capacity.
+    system = yaml.safe_load((Path(aisimulate_core.__file__).parent / "systems" / "gb300.yaml").read_text())
+    capacity = int(system["gpu"]["mem_capacity"])
+    fp8 = build("zai-org/GLM-5.3-Flash", backend, tp=1)
+    nvfp4 = build("nvidia/GLM-5.3-Flash-NVFP4", backend, tp=1)
+    assert fp8.get_resident_weights_bytes() > capacity
+    assert nvfp4.get_resident_weights_bytes() < capacity
 
 
 @pytest.mark.parametrize("path", MODEL_REVISIONS)
