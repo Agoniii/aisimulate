@@ -329,6 +329,7 @@ def test_recommendation_domains_lower_without_loss():
         "rate_degradation": 0.8,
         "mode": "analytical",
         "host_profile": None,
+        "frontend": None,
         "transfer_bandwidth_gb_per_second": None,
     }
     assert lowered.workload.source_type == "synthetic"

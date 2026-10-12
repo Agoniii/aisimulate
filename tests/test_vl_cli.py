@@ -14,7 +14,6 @@ from pydantic import ValidationError
 from aisimulate.capacity import materialize_aic_num_gpu_blocks
 from aisimulate.compiler import prediction_to_replay_spec
 from aisimulate.config.cli import CorePredictionConfig, CoreRecommendationConfig
-from aisimulate.config.epd import validate_epd_prediction_mapping
 from aisimulate.config.vl import validate_vl_prediction_mapping
 from aisimulate.main import main
 from aisimulate.recommend import recommendation_to_sweeper
@@ -621,8 +620,9 @@ def test_native_encoder_pool_gates_the_language_worker(tmp_path, capsys):
 @pytest.mark.parametrize(
     "kind,fragment",
     [
-        ("host_profile", "requires host_profile and transfer"),
-        ("transfer", "requires host_profile and transfer"),
+        ("host_profile", "one of host_profile or frontend"),
+        ("transfer", "transfer.bandwidth_gb_per_second"),
+        ("frontend_with_host_profile", "host_profile replaces the explicit frontend stages"),
         ("latency_correction", "latency_correction applies to analytical"),
         ("fixed_timing", "default language timing"),
         ("identity", "identity pools"),
@@ -633,6 +633,8 @@ def test_native_encoder_pool_rejects_unsupported(kind, fragment):
     encoder = raw["engine"]["workers"]["encoder"]
     if kind in ("host_profile", "transfer"):
         del encoder[kind]
+    elif kind == "frontend_with_host_profile":
+        encoder["frontend"] = {"stages": [{"workers": 1, "service_ms": 3.0}]}
     elif kind == "latency_correction":
         encoder["latency_correction"] = 2.0
     elif kind == "fixed_timing":
@@ -694,6 +696,10 @@ def test_native_encoder_pool_recommend_yaml_predict_roundtrip(tmp_path, capsys):
     assert candidate.metrics["gpu_hours"] * 3600 == pytest.approx(candidate.used_gpus * uptime_s)
 
     saved = root / "recommendations" / "0001.yaml"
+    # The saved pool carries the resolved stage with the workload it was measured for, not the table.
+    saved_encoder = yaml.safe_load(saved.read_text())["engine"]["workers"]["encoder"]
+    assert len(saved_encoder["frontend"]["stages"]) == 1 and saved_encoder["frontend"]["measured_for"]
+    assert "host_profile" not in saved_encoder
     concrete = CorePredictionConfig.from_yaml(saved)
     assert concrete.engine.workers.encoder.mode == "native"
     output = tmp_path / "predict"
@@ -701,14 +707,10 @@ def test_native_encoder_pool_recommend_yaml_predict_roundtrip(tmp_path, capsys):
     report = json.loads(capsys.readouterr().out)
     for key in ("mean_ttft_ms", "encoder_latency_ms", "gpu_hours"):
         assert report[key] == pytest.approx(candidate.metrics[key])
-
-    spec = prediction_to_replay_spec(concrete)
-    raw_saved = concrete.model_dump(mode="python", exclude_none=True)
-    validate_epd_prediction_mapping(raw_saved, spec)
-    # A host table that changed underneath the saved recommendation no longer reproduces it.
-    table.write_text(json.dumps(_host_table(rows=[_host_row(service_ms=1.0)])))
-    with pytest.raises(ValueError, match="encoder cost terms changed"):
-        validate_epd_prediction_mapping(raw_saved, spec)
+    # The saved recommendation reads no table: one that disappeared afterwards changes nothing.
+    table.unlink()
+    assert main(["predict", "-c", str(saved), "--output-dir", str(tmp_path / "again"), "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["encoder_latency_ms"] == report["encoder_latency_ms"]
 
 
 def test_native_encoder_pool_accepts_rate_loads(tmp_path, capsys):

@@ -130,7 +130,8 @@ A disaggregated variant is in
 | `engine.workers.encoder.latency_correction` | `1.0` | fixed | Positive multiplier on encoder latency. Analytical pools only; `mode: native` rejects any other value. |
 | `engine.workers.encoder.rate_degradation` | `0.9` | fixed | In `(0, 1]`. Fraction of ideal encoder throughput that is usable. Unused by `mode: native`. |
 | `engine.workers.encoder.mode` | `analytical` | fixed | `analytical` adds the encoder batch latency to mean TTFT. `native` replays SGLang `--encoder-only` servers event by event and gates each request's admission to the language worker; `batch_size` is then the loop's cap (`SGLANG_ENCODER_MAX_BATCH_SIZE`, default 8) and must be a scalar. SGLang only. See [Native encoder pools](#native-encoder-pools). |
-| `engine.workers.encoder.host_profile` | Unset | fixed | `mode: native` only, required: `{path, frontend: python}`. The table's `process` stage prices the encoder's CPU preprocessing. |
+| `engine.workers.encoder.host_profile` | Unset | fixed | `mode: native` only: `{path, frontend: python}`. The table's `process` stage prices the encoder's CPU preprocessing. Exclusive with `frontend`; one of the two is required. |
+| `engine.workers.encoder.frontend` | Unset | fixed | `mode: native` only: the resolved `process` stage with its `measured_for`, as a saved recommendation carries it in place of `host_profile`. Exclusive with `host_profile`. A `predict` of such a YAML reads no host table and refuses a workload other than `measured_for`. |
 | `engine.workers.encoder.transfer.bandwidth_gb_per_second` | Unset | fixed | `mode: native` only, required. Encoder-to-language link; embeddings fan out to every tensor-parallel rank. |
 
 Visual tokens are computed from the image size and added to each request's

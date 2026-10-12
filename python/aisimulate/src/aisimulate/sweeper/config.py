@@ -209,13 +209,17 @@ class EncoderSearch(BaseModel):
     # native: SGLang encoder servers replayed event by event; `batch_size` is then the loop's one batch cap.
     mode: Literal["analytical", "native"] = "analytical"
     host_profile: dict[str, Any] | None = None
+    frontend: dict[str, Any] | None = None
     transfer_bandwidth_gb_per_second: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def _validate_native(self) -> EncoderSearch:
         if self.mode == "native":
-            if self.host_profile is None or self.transfer_bandwidth_gb_per_second is None:
-                raise ValueError("native encoder replay requires host_profile and transfer_bandwidth_gb_per_second")
+            if (self.host_profile is None) == (self.frontend is None) or self.transfer_bandwidth_gb_per_second is None:
+                raise ValueError(
+                    "native encoder replay requires transfer_bandwidth_gb_per_second "
+                    "and one of host_profile or frontend"
+                )
             if len(self.batch_size) != 1:
                 raise ValueError("native encoder replay takes one batch cap, not a batch_size search")
             if self.latency_correction != 1.0:

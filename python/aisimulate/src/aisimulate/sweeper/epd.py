@@ -187,12 +187,20 @@ def _native_encoder_rows(encoder, *, model_name, system, backend, version, datab
     from aisimulate.sdk.errors import InsufficientMemoryError, NoFeasibleConfigError
     from aisimulate.sdk.sweep import _get_encoder_worker_candidates
 
-    from ..config.engine import HostProfileConfig
+    from ..config.engine import FrontendMeasurementConfig, FrontendPredictionConfig, HostProfileConfig
     from ..vl.table import resolve_frontend
 
     (cap,) = encoder.batch_size
-    profile = HostProfileConfig.model_validate(encoder.host_profile)
-    frontend, digest = resolve_frontend(profile, model=model_name, images=images.model_dump(mode="json"))
+    if encoder.frontend is not None:
+        # A saved recommendation carries the resolved stage; it prices only the workload it was measured for.
+        frontend = FrontendPredictionConfig.model_validate(encoder.frontend)
+        needed = FrontendMeasurementConfig.for_workload(model_name, "python", images.model_dump(mode="json"))
+        if frontend.measured_for != needed:
+            raise ValueError("saved encoder frontend stages were measured for another workload")
+        digest = None
+    else:
+        profile = HostProfileConfig.model_validate(encoder.host_profile)
+        frontend, digest = resolve_frontend(profile, model=model_name, images=images.model_dump(mode="json"))
     rows = []
     rejected = []
     for tp in encoder.tp:
@@ -228,8 +236,7 @@ def _native_encoder_rows(encoder, *, model_name, system, backend, version, datab
                     timing_model=encoder_timing_payload(
                         model=model_name, system=system, backend=backend, backend_version=version, tp=tp
                     ),
-                    host_profile_path=profile.path,
-                    host_profile_frontend=profile.frontend,
+                    frontend=frontend.model_dump(mode="json"),
                     host_profile_digest=digest,
                 ),
             }

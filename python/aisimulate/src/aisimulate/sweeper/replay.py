@@ -88,7 +88,8 @@ class NativeEncoderTiming:
     (`timing_model`, a prefill-shaped rank at the pool's tensor width whose model
     compiles the vision tower). `preprocess_ms_per_image` extrapolates the tokenizer
     manager's measured `process` stage per image, the origin `preprocess_source`
-    records; the encoder servers run the same image processor.
+    records; the encoder servers run the same image processor. `frontend` is that
+    stage with the workload it was measured for, so a saved pool needs no table.
     """
 
     preprocess_ms_per_image: float
@@ -99,13 +100,15 @@ class NativeEncoderTiming:
     transfer_bytes_per_image: int
     transfer_bandwidth_gb_s: float
     timing_model: dict[str, Any]
-    host_profile_path: str
-    host_profile_frontend: str
-    host_profile_digest: str
+    frontend: dict[str, Any]
+    # Content digest of the host table row the stage was resolved from; a saved stage carries none.
+    host_profile_digest: str | None
 
     def __post_init__(self):
         if not math.isfinite(self.preprocess_ms_per_image) or self.preprocess_ms_per_image < 0:
             raise ValueError("encoder preprocess_ms_per_image must be finite and non-negative")
+        if not isinstance(self.frontend.get("stages"), list) or not self.frontend["stages"]:
+            raise ValueError("encoder frontend must carry at least one stage")
         if set(self.shape) != set(_ENCODER_SHAPE_FIELDS) or any(
             type(value) is not int or value <= 0 for value in self.shape.values()
         ):

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -23,11 +23,9 @@ def encoder_prediction_fields(encoder: EncoderPoolSpec) -> dict:
         "latency_correction": encoder.latency_correction,
         "rate_degradation": encoder.rate_degradation,
         "mode": encoder.mode,
-        "host_profile": (
-            {"path": encoder.native.host_profile_path, "frontend": encoder.native.host_profile_frontend}
-            if encoder.native is not None
-            else None
-        ),
+        # A saved pool carries the resolved stage, never the table it was taken from.
+        "host_profile": None,
+        "frontend": encoder.native.frontend if encoder.native is not None else None,
         "transfer": (
             {"bandwidth_gb_per_second": encoder.native.transfer_bandwidth_gb_s} if encoder.native is not None else None
         ),
@@ -106,8 +104,10 @@ def validate_epd_prediction_mapping(value: dict, spec: ReplaySpec) -> None:
             mine, scored = _execution_traffic(compiled), _execution_traffic(spec)
             if mine != scored:
                 raise ValueError(f"traffic changed: {_differences(mine, scored)}")
-            # The host table and the geometry behind the pool's terms may have changed.
-            if compiled.backend_deployment.encoder.native != encoder.native:
+            # The saved stage carries no table digest; the geometry and every other term must match.
+            if replace(compiled.backend_deployment.encoder.native, host_profile_digest=None) != replace(
+                encoder.native, host_profile_digest=None
+            ):
                 raise ValueError("encoder cost terms changed")
         if _language_execution(compiled) != _language_execution(spec):
             raise ValueError("language replay settings changed")

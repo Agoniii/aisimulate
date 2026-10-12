@@ -481,6 +481,17 @@ def _frontend_implies_host_loop(value: Any) -> Any:
     return value
 
 
+def _validate_frontend_source(
+    config: HostWorkerPredictionConfig
+    | HostWorkerRecommendationConfig
+    | EncoderPredictionConfig
+    | EncoderRecommendationConfig,
+) -> None:
+    """Frontend stages come from one source: spelled out, or resolved from a host cost table."""
+    if config.host_profile is not None and config.frontend is not None:
+        raise ValueError("host_profile replaces the explicit frontend stages")
+
+
 class HostWorkerPredictionConfig(WorkerPredictionConfig):
     """The aggregated or prefill worker can model SGLang's scheduler loop, frontend and vision encoder."""
 
@@ -499,8 +510,7 @@ class HostWorkerPredictionConfig(WorkerPredictionConfig):
     def _validate_host_features(self) -> HostWorkerPredictionConfig:
         if (self.frontend is not None or self.host_profile is not None) and not self.host_loop:
             raise ValueError("frontend stages run ahead of the scheduler loop; drop host_loop: false")
-        if self.host_profile is not None and self.frontend is not None:
-            raise ValueError("host_profile replaces the explicit frontend stages")
+        _validate_frontend_source(self)
         return self
 
 
@@ -539,6 +549,10 @@ class EncoderPredictionConfig(StrictModel):
         default=None,
         description="native: the `process` stage of this host cost table prices the encoder's CPU preprocessing.",
     )
+    frontend: FrontendPredictionConfig | None = Field(
+        default=None,
+        description="native: the resolved `process` stage a saved recommendation carries in place of host_profile.",
+    )
     transfer: EncoderTransferConfig | None = Field(
         default=None, description="native: embedding transfer from the encoder to the language rank."
     )
@@ -553,14 +567,22 @@ class EncoderPredictionConfig(StrictModel):
 
 def _validate_encoder_mode(encoder: EncoderPredictionConfig | EncoderRecommendationConfig) -> None:
     if encoder.mode == "native":
-        if encoder.host_profile is None or encoder.transfer is None:
-            raise ValueError("native encoder replay requires host_profile and transfer.bandwidth_gb_per_second")
-        if encoder.host_profile.frontend != "python":
+        _validate_frontend_source(encoder)
+        if encoder.transfer is None or (encoder.host_profile is None and encoder.frontend is None):
+            raise ValueError(
+                "native encoder replay requires transfer.bandwidth_gb_per_second and one of host_profile or frontend"
+            )
+        if encoder.host_profile is not None and encoder.host_profile.frontend != "python":
             raise ValueError("the encoder servers run the Python image processor; host_profile.frontend must be python")
+        measured = encoder.frontend.measured_for if encoder.frontend is not None else None
+        if measured is not None and measured.frontend != "python":
+            raise ValueError(
+                "the encoder servers run the Python image processor; frontend.measured_for.frontend must be python"
+            )
         if encoder.latency_correction != 1.0:
             raise ValueError("latency_correction applies to analytical encoder pools only")
-    elif encoder.host_profile is not None or encoder.transfer is not None:
-        raise ValueError("host_profile and transfer apply to encoder mode=native only")
+    elif encoder.host_profile is not None or encoder.frontend is not None or encoder.transfer is not None:
+        raise ValueError("host_profile, frontend and transfer apply to encoder mode=native only")
 
 
 class WorkersPredictionConfig(StrictModel):
@@ -922,8 +944,7 @@ class HostWorkerRecommendationConfig(WorkerRecommendationConfig):
     def _validate_host_features(self) -> HostWorkerRecommendationConfig:
         if (self.frontend is not None or self.host_profile is not None) and not self.host_loop:
             raise ValueError("frontend stages run ahead of the scheduler loop; drop host_loop: false")
-        if self.host_profile is not None and self.frontend is not None:
-            raise ValueError("host_profile replaces the explicit frontend stages")
+        _validate_frontend_source(self)
         return self
 
 
@@ -941,6 +962,7 @@ class EncoderRecommendationConfig(StrictModel):
     latency_correction: PositiveFloat = 1.0
     rate_degradation: Fraction = 0.9
     host_profile: HostProfileConfig | None = None
+    frontend: FrontendPredictionConfig | None = None
     transfer: EncoderTransferConfig | None = None
 
     _batch_cap = model_validator(mode="before")(_native_encoder_batch_cap)

@@ -225,9 +225,12 @@ The language worker runs `--language-only`: it neither hosts the vision tower
 nor prices image frontend stages (`vision`, `frontend`, and `host_profile` are
 rejected on it), while `host_loop` still models its scheduler loop. Visual
 placeholders occupy its prompt as they do on the analytical path. A saved
-recommendation pins the resolved encoder fields; `predict` re-resolves the host
-table at run time, and the row's content digest is recorded in the prediction
-metadata and the recommendation ledger. Not modeled:
+recommendation carries the resolved `process` stage with its `measured_for` as
+`encoder.frontend` in place of `host_profile`, so `predict` reads no host table
+for it and a table edited after the search does not change its result; the
+row's content digest is recorded in the recommendation ledger and, through the
+encoder block of the prediction metadata, in `prediction.json` whenever a
+table was resolved. Not modeled:
 `--enable-adaptive-dispatch-to-encoder` (single-image requests encoded locally,
 off by default), the mooncake GPU-direct transfer and the encoder's prefix
 embedding cache, and the resident tower weights that Qwen-VL still loads on a

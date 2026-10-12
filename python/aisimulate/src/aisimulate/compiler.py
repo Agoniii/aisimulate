@@ -174,6 +174,7 @@ def _prediction_encoder(config: CorePredictionConfig, workload):
         rate_degradation=encoder.rate_degradation,
         mode=encoder.mode,
         host_profile=encoder.host_profile.model_dump(mode="json") if encoder.host_profile is not None else None,
+        frontend=encoder.frontend.model_dump(mode="json") if encoder.frontend is not None else None,
         transfer_bandwidth_gb_per_second=(
             encoder.transfer.bandwidth_gb_per_second if encoder.transfer is not None else None
         ),

@@ -277,6 +277,7 @@ def recommendation_to_sweeper(
             "rate_degradation": encoder["rate_degradation"],
             "mode": encoder.get("mode", "analytical"),
             "host_profile": encoder.get("host_profile"),
+            "frontend": encoder.get("frontend"),
             "transfer_bandwidth_gb_per_second": (encoder.get("transfer") or {}).get("bandwidth_gb_per_second"),
         }
     transfer = engine.get("kv_transfer")
