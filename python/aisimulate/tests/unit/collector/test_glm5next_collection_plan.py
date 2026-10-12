@@ -27,7 +27,7 @@ pytestmark = pytest.mark.unit
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FP8 = "zai-org/GLM-5.3-Flash"
 NVFP4 = "nvidia/GLM-5.3-Flash-NVFP4"
-GLM_OFFGRID_WIDTHS = {16, 32, 160, 288, 6416, 12576, 24576, 24896, 38720, 77440, 154880}
+GLM_OFFGRID_WIDTHS = {16, 32, 288, 6416, 12576, 24576, 24896, 38720, 77440, 154880}
 
 
 def _compat(relative_path: str) -> str:
@@ -160,7 +160,7 @@ def test_vllm_nvfp4_uses_modelopt_only_for_the_glm53flash_checkpoint(monkeypatch
     "version,accepted",
     [
         ("0.31.0", True),
-        ("0.30.0", True),
+        ("0.30.0", False),
         ("0.28.0", False),
         ("0.29.0", False),
         ("0.31.1", False),
@@ -230,28 +230,9 @@ def test_sglang_0520_queues_small_shapes_the_v1_fixme_skipped(monkeypatch):
     types_by_shape = {}
     for gemm_type, x, n, k in cases:
         types_by_shape.setdefault((n, k), set()).add(gemm_type)
-    assert types_by_shape[(288, 4096)] == {"bfloat16", "fp8", "fp8_block", "nvfp4"}
-    assert types_by_shape[(32, 4096)] == {"bfloat16", "fp8", "fp8_block", "nvfp4"}
-
-
-@pytest.mark.parametrize(
-    "chosen,label",
-    [
-        (["aot"], "sglang_sgl_kernel_fp8_scaled_mm"),
-        (["torch", "torch"], "sglang_torch_scaled_mm"),
-        ([], "sglang_triton_scaled_mm"),
-    ],
-)
-def test_sglang_0520_fp8_label_comes_from_the_executed_backend(monkeypatch, chosen, label):
-    module = _load_sglang_gemm_0520(monkeypatch)
-    assert module._fp8_kernel_source(chosen) == label
-
-
-@pytest.mark.parametrize("chosen", [["aot", "torch"], ["jit"]])
-def test_sglang_0520_fp8_label_rejects_mixed_or_unknown_backends(monkeypatch, chosen):
-    module = _load_sglang_gemm_0520(monkeypatch)
-    with pytest.raises(RuntimeError, match="unexpected Fp8ScaledMMOp backends"):
-        module._fp8_kernel_source(chosen)
+    # Per-tensor fp8 has no 0.5.20 consumer and is not planned.
+    assert types_by_shape[(288, 4096)] == {"bfloat16", "fp8_block", "nvfp4"}
+    assert types_by_shape[(32, 4096)] == {"bfloat16", "fp8_block", "nvfp4"}
 
 
 def test_sglang_nvfp4_allowlist_admits_glm53flash_nvfp4_only():

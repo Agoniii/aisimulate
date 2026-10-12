@@ -30,15 +30,6 @@ selection; kernel_source records the branch the framework took.
 #   CuTe DSL TGV when use_cutedsl_bf16_gemm(m,n,k) (cutedsl_bf16_gemm.py:
 #   1357-1387), else F.linear (unquant.py:315-350). collect_gemm.py times
 #   F.linear unconditionally, which is not serving truth on SM10x.
-# fp8 (per-channel weight, dynamic per-token activation): apply_fp8_linear
-#   (quantization/fp8_utils.py:1888-2060) quantizes with the 0.5.20 JIT
-#   per_token_quant_fp8 kernel (kernels/ops/quantization/__init__.py:21-34,
-#   76-84) and runs Fp8ScaledMMOp (kernels/ops/gemm/__init__.py:27-162: AOT
-#   sgl_kernel, or torch._scaled_mm on SM90 for large M), a tuned Triton
-#   tile when get_w8a8_channelwise_fp8_config has one, or triton_scaled_mm
-#   when N or K is not a multiple of 16. Fp8ScaledMMOp picks its backend
-#   per call (kernels/fused_op.py:569-575); the collector observes that
-#   choice during the eager dry run.
 # fp8_block: Fp8LinearMethod (quantization/fp8.py) with the auto runner
 #   deepgemm_w8a8_block_fp8_linear_with_fallback when JIT DeepGEMM is on
 #   (fp8_utils.py:799-810); shapes with N%64 or K%128 fall back to Triton
@@ -52,6 +43,8 @@ selection; kernel_source records the branch the framework took.
 # The collect_gemm.py FIXME(kernel-limit) "n<128 or k<128" is false at this
 # version (fp8_block falls back to Triton; nvfp4 pads to 32), so this fork
 # queues those shapes and lets the framework handle them.
+# Per-tensor fp8 is not collected at this version: no 0.5.20 consumer reads
+# it (GLM-5.3-Flash serves fp8_block, nvfp4 and bf16 GEMMs only).
 __compat__ = "sglang==0.5.20"
 
 import os
@@ -94,18 +87,16 @@ def _ensure_serving_gemm_config() -> None:
 
 def get_gemm_test_cases():
     sm_version = get_sm_version()
-    if sm_version < 89:
+    if sm_version < 90:
         gemm_list = ["bfloat16"]
-    elif sm_version < 90:
-        gemm_list = ["bfloat16", "fp8"]
     elif sm_version < 100:
-        gemm_list = ["fp8_block", "bfloat16", "fp8"]
+        gemm_list = ["fp8_block", "bfloat16"]
     elif sm_version < 110:
-        gemm_list = ["fp8_block", "bfloat16", "fp8", "nvfp4"]
+        gemm_list = ["fp8_block", "bfloat16", "nvfp4"]
     else:
         # SM120 dense fp8_block serving is CUTLASS (fp8_utils.py:832-833);
         # not collected here, unchanged from collect_gemm.py.
-        gemm_list = ["bfloat16", "fp8", "nvfp4"]
+        gemm_list = ["bfloat16", "nvfp4"]
 
     requested_gemm_types = os.environ.get("AIC_COLLECT_GEMM_TYPES")
     if requested_gemm_types:
@@ -200,59 +191,8 @@ def _nvfp4_kernel_source() -> str:
     return f"sglang_flashinfer_{str(backend).replace('-', '')}_nvfp4"
 
 
-_FP8_SCALED_MM_BACKEND_LABELS = {
-    # Fp8ScaledMMOp backends (kernels/ops/gemm/__init__.py:75-162).
-    "aot": "sglang_sgl_kernel_fp8_scaled_mm",
-    "torch": "sglang_torch_scaled_mm",
-}
-
-
-def _fp8_kernel_source(chosen_backends: list[str]) -> str:
-    """Label apply_fp8_linear's GEMM from the Fp8ScaledMMOp backend(s) that ran.
-
-    No Fp8ScaledMMOp call means the GEMM ran through triton_scaled_mm
-    (misaligned N/K, or a tuned Triton tile, fp8_utils.py:2025-2053).
-    """
-    if not chosen_backends:
-        return "sglang_triton_scaled_mm"
-    labels = {_FP8_SCALED_MM_BACKEND_LABELS.get(backend) for backend in chosen_backends}
-    if len(labels) != 1 or None in labels:
-        raise RuntimeError(f"SGLang fp8 GEMM ran unexpected Fp8ScaledMMOp backends: {sorted(set(chosen_backends))}")
-    return labels.pop()
-
-
-def _run_observing_fp8_scaled_mm_backend(func) -> list[str]:
-    """Run ``func`` once eagerly and return the Fp8ScaledMMOp backends selected.
-
-    Fp8ScaledMMOp dispatches per call (fused_op.py:569-575,
-    _forward_backend_dynamic): the first backend whose backend_eligible() is
-    true runs. Observing backend_eligible's first True per call records that
-    choice without changing it (the fused-op trace only reports the dynamic
-    dispatcher's own name).
-    """
-    from sglang.kernels.ops import gemm as gemm_ops
-
-    op = gemm_ops._FP8_SCALED_MM
-    chosen: list[str] = []
-    original = op.backend_eligible
-
-    def observe(backend, *args, **kwargs):
-        eligible = original(backend, *args, **kwargs)
-        if eligible:
-            chosen.append(getattr(backend, "value", str(backend)))
-        return eligible
-
-    op.backend_eligible = observe
-    try:
-        func()
-        torch.cuda.synchronize()
-    finally:
-        del op.backend_eligible
-    return chosen
-
-
 def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  # noqa: N803
-    if gemm_type not in {"fp8_block", "fp8", "bfloat16", "nvfp4"}:
+    if gemm_type not in {"fp8_block", "bfloat16", "nvfp4"}:
         raise ValueError(f"unsupported SGLang GEMM type {gemm_type!r}")
     torch.cuda.set_device(device)
     torch.set_default_device(device)
@@ -262,23 +202,6 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
 
     def create_gemm():
         x = torch.randn((M, K), dtype=dtype, device=device)
-        if gemm_type == "fp8":
-            from sglang.srt.layers.quantization.fp8_utils import apply_fp8_linear, cutlass_fp8_supported
-
-            fp8_info = torch.finfo(torch.float8_e4m3fn)
-            weight = (
-                ((torch.rand(N, K, device=device) - 0.5) * 2 * fp8_info.max)
-                .clamp(min=fp8_info.min, max=fp8_info.max)
-                .to(torch.float8_e4m3fn)
-                .t()
-            )
-            weight_scale = torch.rand((N, 1), device=device, dtype=torch.float32) + 0.5
-            use_cutlass = cutlass_fp8_supported()
-
-            def gemm_op():
-                return apply_fp8_linear(x, weight, weight_scale, cutlass_fp8_supported=use_cutlass)
-
-            return gemm_op
         layer = _build_linear(gemm_type, N, K, device)
 
         def gemm_op():
@@ -294,7 +217,7 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
         transient_bytes = 0
         if gemm_type == "bfloat16":
             persistent_bytes += N * K * 2
-        elif gemm_type in {"fp8", "fp8_block"}:
+        elif gemm_type == "fp8_block":
             persistent_bytes += N * K + M * K + N * 4 + M * 4
             transient_bytes = N * K * 4
         elif gemm_type == "nvfp4":
@@ -309,17 +232,15 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
         for _ in range(outside_loop_count):
             op_list.append(create_gemm())
 
-        # Eager dry run: JIT-compiles outside graph capture and, for fp8,
-        # records the Fp8ScaledMMOp backend that actually executed.
-        chosen_backends = _run_observing_fp8_scaled_mm_backend(op_list[0])
+        # Eager dry run: JIT-compiles outside graph capture.
+        op_list[0]()
+        torch.cuda.synchronize()
         if gemm_type == "bfloat16":
             kernel_source = _bf16_kernel_source(M, N, K)
         elif gemm_type == "fp8_block":
             kernel_source = _fp8_block_kernel_source(op_list[0].layer, N, K)
-        elif gemm_type == "nvfp4":
-            kernel_source = _nvfp4_kernel_source()
         else:
-            kernel_source = _fp8_kernel_source(chosen_backends)
+            kernel_source = _nvfp4_kernel_source()
 
         def kernel_func():
             for op in op_list:

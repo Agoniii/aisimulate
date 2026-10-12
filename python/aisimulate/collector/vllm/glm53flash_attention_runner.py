@@ -21,7 +21,7 @@ request's tokens (models/glm5next/nvidia/sparse_indexer.py:47-90
 ``_kpool_compress_insert``, "Assumes pool-aligned chunk starts"). Every planned
 chunk starts on a multiple of 4 (contract ``seed_chunk``; aligned targets); the
 driver checks every scheduled prefill chunk and raises ``KpoolAlignmentError``
-before an unaligned one could run, and records the chunk starts per target.
+before an unaligned one could run.
 
 Graph mode: the serving default ``FULL_AND_PIECEWISE`` with the deployment's
 capture sizes: uniform decode batches replay FULL graphs and prefill steps up
@@ -44,7 +44,6 @@ from collector.glm53flash_attention_contract import (
     RUNTIME_VERSIONS,
     build_plan,
     geometry,
-    queued_plan,
     representative_layer_is_uniform,
     selected_max_model_len,
     selected_plan,
@@ -59,14 +58,14 @@ from collector.glm53flash_attention_runtime import (
 from collector.glm53flash_attention_tokens import manifest_tokens
 from collector.glm53flash_attention_tokens import spec as input_token_spec
 
-PLUGIN_ENTRY = "glm53flash_w4 = collector.vllm.glm53flash_attention_worker:register\n"
+PLUGIN_ENTRY = "glm53flash_attn = collector.vllm.glm53flash_attention_worker:register\n"
 
 
 def write_plugin(directory: Path) -> Path:
     """Expose the probe through vLLM's general-plugin entry-point group."""
-    dist = directory / "glm53flash_w4_probe-1.0.dist-info"
+    dist = directory / "glm53flash_attn_probe-1.0.dist-info"
     dist.mkdir(parents=True, exist_ok=True)
-    (dist / "METADATA").write_text("Metadata-Version: 2.1\nName: glm53flash-w4-probe\nVersion: 1.0\n")
+    (dist / "METADATA").write_text("Metadata-Version: 2.1\nName: glm53flash-attn-probe\nVersion: 1.0\n")
     (dist / "entry_points.txt").write_text("[vllm.general_plugins]\n" + PLUGIN_ENTRY)
     return directory
 
@@ -84,7 +83,6 @@ class Driver:
         self.tokens = tokens
         self.output = output
         self.counter = 0
-        self.chunk_starts: set[int] = set()
 
     def rpc(self, name, *args):
         from collector.vllm import glm53flash_attention_worker as worker
@@ -108,11 +106,7 @@ class Driver:
         if unaligned:
             raise KpoolAlignmentError(f"prefill chunk would start at {unaligned} (not a multiple of {KPOOL_ALIGN})")
         self.engine.step()
-        after = {r.request_id: r.num_computed_tokens for r in self._requests(prefix)}
-        for request, (computed, prompt) in before.items():
-            if computed < prompt and after.get(request, prompt) > computed:
-                self.chunk_starts.add(computed)
-        state = list(after.values())
+        state = [r.num_computed_tokens for r in self._requests(prefix)]
         if expected_computed is not None and state and state != [expected_computed] * batch:
             raise RuntimeError(f"requests computed {state}, planned {expected_computed}")
 
@@ -126,7 +120,6 @@ class Driver:
                 {"prompt_token_ids": request_tokens(self.tokens, request, length)},
                 params,
             )
-        self.chunk_starts = set()
 
     def _seed(self, prefix, batch, chunk, start, end):
         computed = start
@@ -140,7 +133,7 @@ class Driver:
     def run_prefill(self, request_set, progress):
         batch, query = request_set["batch_size"], request_set["query"]
         self.counter += 1
-        prefix = f"w4-{self.counter:04d}-{request_set['set_id']}"
+        prefix = f"attn-{self.counter:04d}-{request_set['set_id']}"
         last = request_set["targets"][-1] + query
         self._add(prefix, batch, last, 1)
         computed = 0
@@ -159,9 +152,8 @@ class Driver:
                 "prefix": value,
                 "x": query,
                 "target_id": target_id("context", batch, value, query),
-                "chunk_starts": sorted(self.chunk_starts),
             }
-            result = self.rpc("rpc_measure_prefill", target, replays.pop())
+            self.rpc("rpc_measure_prefill", target, replays.pop())
             computed = value + query
             progress(
                 {
@@ -169,8 +161,6 @@ class Driver:
                     "target_id": target["target_id"],
                     "elapsed_seconds": time.monotonic() - started,
                     "status": "passed",
-                    "chunk_starts": target["chunk_starts"],
-                    "rpc": result,
                 }
             )
         if self.engine.has_unfinished_requests():
@@ -181,7 +171,7 @@ class Driver:
         for length in request_set["targets"]:
             started = time.monotonic()
             self.counter += 1
-            prefix = f"w4-{self.counter:04d}-{request_set['set_id']}-l{length}"
+            prefix = f"attn-{self.counter:04d}-{request_set['set_id']}-l{length}"
             self._add(prefix, batch, length - 1, 2)
             self._seed(prefix, batch, request_set["seed_chunk"], 0, length - 1)
             target = {
@@ -190,7 +180,6 @@ class Driver:
                 "prefix": 0,
                 "x": length,
                 "target_id": target_id("generation", batch, 0, length),
-                "chunk_starts": sorted(self.chunk_starts),
             }
             self._budget(batch, request_set["seed_chunk"])
             before = [r.num_computed_tokens for r in self._requests(prefix)]
@@ -200,7 +189,7 @@ class Driver:
             if len(replays) != 1:
                 raise RuntimeError(f"workers disagree on FULL replay counts {replays}")
             self._step(prefix, batch, None)
-            result = self.rpc("rpc_measure_decode", target, replays.pop())
+            self.rpc("rpc_measure_decode", target, replays.pop())
             if self.engine.has_unfinished_requests():
                 raise RuntimeError("decode request set did not finish after its measured step")
             progress(
@@ -209,8 +198,6 @@ class Driver:
                     "target_id": target["target_id"],
                     "elapsed_seconds": time.monotonic() - started,
                     "status": "passed",
-                    "chunk_starts": target["chunk_starts"],
-                    "rpc": result,
                 }
             )
 
@@ -222,7 +209,6 @@ def main():
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--only-sets", nargs="*", default=None)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
-    parser.add_argument("--dry-run", action="store_true", help="resolve everything, then exit before CUDA work")
     options = parser.parse_args()
     manifest_path = Path(options.manifest).resolve()
     manifest = json.loads(manifest_path.read_text())
@@ -252,8 +238,8 @@ def main():
     plugin = write_plugin(output / "plugin")
     os.environ["PYTHONPATH"] = f"{plugin}:{os.environ.get('PYTHONPATH', '')}"
     sys.path.insert(0, str(plugin))
-    os.environ["GLM53_W4_MANIFEST"] = str(manifest_path)
-    os.environ["GLM53_W4_FRAMEWORK_VERSION"] = manifest["framework_version"]
+    os.environ["GLM53_ATTN_MANIFEST"] = str(manifest_path)
+    os.environ["GLM53_ATTN_FRAMEWORK_VERSION"] = manifest["framework_version"]
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
     from importlib.metadata import version
@@ -292,35 +278,8 @@ def main():
         "disable_log_stats": True,
         "seed": 0,
     }
-    (output / "execution-contract.json").write_text(
-        json.dumps({"engine_args": engine_args, "manifest_sha256": manifest["manifest_sha256"]}, sort_keys=True)
-    )
-    if options.dry_run:
-        from importlib.metadata import entry_points
-
-        from vllm.engine.arg_utils import EngineArgs
-
-        EngineArgs(**engine_args)
-        plugins = [e.value for e in entry_points(group="vllm.general_plugins")]
-        if "collector.vllm.glm53flash_attention_worker:register" not in plugins:
-            raise RuntimeError(f"probe plugin is not discoverable: {plugins}")
-        print(
-            json.dumps(
-                {
-                    "dry_run": "ok",
-                    "framework": installed,
-                    "geometry": expected,
-                    "sets": len(queued_plan(manifest)["sets"]),
-                    "memory_drops": len(manifest.get("memory_drops") or []),
-                    "engine_args": engine_args,
-                    "plugins": plugins,
-                },
-                sort_keys=True,
-            )
-        )
-        return
     llm = LLM(**engine_args)
-    source_sha, sources = package_source_sha256(Path(vllm.__file__).resolve().parent)
+    source_sha, _ = package_source_sha256(Path(vllm.__file__).resolve().parent)
     provenance = {
         "framework_version": installed,
         "source_sha256": source_sha,
@@ -330,9 +289,7 @@ def main():
         "layer_id": manifest["layer_id"],
     }
     tokenizer = llm.get_tokenizer()
-    tokens, inputs = manifest_tokens(manifest, tokenizer, Path(options.model_path))
-    (output / "source_hashes.json").write_text(json.dumps(sources, sort_keys=True))
-    (output / "input_provenance.json").write_text(json.dumps({**inputs, **provenance}, sort_keys=True))
+    tokens, _ = manifest_tokens(manifest, tokenizer, Path(options.model_path))
     driver = Driver(llm, plan, tokens, output)
     setup = driver.rpc(
         "rpc_setup",
@@ -341,7 +298,6 @@ def main():
         provenance,
         {"warmup": plan["warmup"], "iterations": plan["iterations"]},
     )
-    (output / "worker-setup.json").write_text(json.dumps(setup, sort_keys=True))
     if sorted(r["rank"] for r in setup) != list(range(expected["tp_size"])):
         raise RuntimeError(f"unexpected worker ranks {setup}")
 
@@ -349,8 +305,7 @@ def main():
         with (output / "progress.jsonl").open("a") as stream:
             stream.write(json.dumps(payload) + "\n")
 
-    # The attempt's queue: its selected sets without memory-dropped targets.
-    for request_set in queued_plan(manifest)["sets"]:
+    for request_set in selected_plan(manifest)["sets"]:
         if options.only_sets and request_set["set_id"] not in options.only_sets:
             continue
         try:

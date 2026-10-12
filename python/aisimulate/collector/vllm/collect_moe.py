@@ -72,8 +72,9 @@ approximation must be retired.
 # 1968047). Existing framework construction/dispatch is unchanged. Invalid
 # model/quant shapes continue to raise and remain recorded failures; this is
 # API compatibility, not a claim that every Cartesian shape is supported.
-# 0.30.0 audit (2026-09-30; source tag v0.30.0 == ced6857afa0e vs v0.27.1,
-# source-only). 0.28.0/0.29.0 were NOT audited and stay excluded.
+# 0.30.0 source audit (2026-09-30; tag v0.30.0 == ced6857afa0e vs v0.27.1),
+# the baseline of the 0.31.0 audit below. 0.28.0, 0.29.0 and 0.30.0 itself
+# are not admitted: no consumer reads their tables.
 # FusedMoEFactory (layer.py:88-131 @0.30.0, :99-140 @0.27.1): every kwarg
 # passed here is unchanged; 0.30.0 only adds defaulted params. swiglu_limit
 # exists at both (:108 / :119), so other models keep passing None.
@@ -159,7 +160,7 @@ approximation must be retired.
 # K3 SiTU: FusedMoEFactory exposes activation_situ_beta on stock 0.30.0 and
 # 0.31.0, so the probe below passes the betas natively there; the
 # situ-as-silu approximation applies only to older stock builds.
-__compat__ = "vllm>=0.24.0,<=0.31.0,!=0.25.1,!=0.26.0,!=0.27.0,!=0.28.0,!=0.29.0"
+__compat__ = "vllm>=0.24.0,<=0.31.0,!=0.25.1,!=0.26.0,!=0.27.0,!=0.28.0,!=0.29.0,!=0.30.0"
 
 import contextlib
 import json

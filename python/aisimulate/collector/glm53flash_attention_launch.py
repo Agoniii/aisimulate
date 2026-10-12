@@ -4,7 +4,7 @@
 
 CPU-only. ``prepare`` writes ``manifest.json`` (pinned runtime, checkpoint,
 geometry, the frozen plan and the attempt's set selection) plus ``run.sbatch``
-and ``dryrun.sbatch`` into a fresh attempt directory; the caller copies the
+into a fresh attempt directory; the caller copies the
 directory to shared storage and submits it. One attempt = one (backend,
 checkpoint, TP) deployment and one context class (one server context limit)
 on one exclusive node.
@@ -25,61 +25,12 @@ from collector.glm53flash_attention_contract import (
     build_plan,
     context_class_sets,
     geometry,
-    memory_drops,
     representative_layer_is_uniform,
     sha256_json,
     unaligned_targets,
 )
 from collector.glm53flash_attention_tokens import spec as input_token_spec
 
-_SMOKE_COMMON = {
-    "layer_id": 3,
-    "warmup": 3,
-    "iterations": 10,
-    "max_step_tokens": 8192,
-    "max_context": 131072,
-    "max_model_len": 131079,
-}
-_SMOKE_DECODE = {"batch_sizes": [1, 32], "sequence_lengths": {"1": [2048, 2049, 16384], "32": [4096]}}
-# Small smoke plans whose geometries can be compared against in-serving nsys
-# traces of the module (vLLM points are multiples of the IndexPool size 4).
-# "long" holds one ~1M prefill and the 1M decode, plus two regular-length
-# decodes that expose any dependence on the server context limit.
-SMOKE_SWEEPS = {
-    "validation-vllm": {
-        **_SMOKE_COMMON,
-        "prefill": {
-            "batch_sizes": [1, 4, 32],
-            "query_lengths": {"1": [32, 2048, 8192], "4": [256], "32": [8]},
-            "prefix_lengths": {"1": {"32": [128], "2048": [0], "8192": [0]}, "4": [12032], "32": [0]},
-        },
-        "decode": _SMOKE_DECODE,
-    },
-    "validation-sglang": {
-        **_SMOKE_COMMON,
-        "prefill": {
-            "batch_sizes": [1, 4, 32],
-            "query_lengths": {"1": [32, 2042, 8189], "4": [256], "32": [10, 32, 250, 256]},
-            "prefix_lengths": {
-                "1": {"32": [128], "2042": [0], "8189": [0]},
-                "4": [12032],
-                "32": {"10": [0], "32": [4352], "250": [0], "256": [98048]},
-            },
-        },
-        "decode": _SMOKE_DECODE,
-    },
-    "long": {
-        **_SMOKE_COMMON,
-        "prefill": {"batch_sizes": [], "query_lengths": {}, "prefix_lengths": []},
-        "decode": {"batch_sizes": [], "sequence_lengths": {}},
-        "long_context": {
-            "max_context": 1048575,
-            "max_model_len": 1048576,
-            "prefill": {"batch_sizes": [1], "query_lengths": {"1": [1024]}, "prefix_lengths": [1032192]},
-            "decode": {"batch_sizes": [1], "sequence_lengths": {"1": [2048, 16384, 1048575]}},
-        },
-    },
-}
 SGLANG_ARGS = (
     "--kv-cache-dtype fp8_e4m3 --moe-runner-backend auto --disable-radix-cache "
     "--chunked-prefill-size 8192 --mem-fraction-static 0.82 "
@@ -108,8 +59,9 @@ VLLM_ENV = {
 }
 # One GB300 holds ~279 GiB; the FP8 checkpoint's safetensors are 305.8 GiB
 # (zai-org/GLM-5.3-Flash@eb9eb208), the NVFP4 checkpoint's 190.4 GiB. TP1 is
-# therefore an NVFP4-only deployment (capacity fact).
-TP1_CHECKPOINTS = ("nvfp4",)
+# therefore an NVFP4-only deployment (capacity fact), and it is collected for
+# vLLM only: no SGLang TP1 deployment is predicted.
+TP1_DEPLOYMENTS = {("vllm", "nvfp4")}
 
 
 def prepare(args) -> Path:
@@ -119,17 +71,7 @@ def prepare(args) -> Path:
     if attempt.exists() and any(attempt.iterdir()):
         raise SystemExit(f"{attempt} is not a fresh attempt directory")
     config = json.loads(Path(args.config).read_text())
-    if args.smoke:
-        sweep = json.loads(json.dumps(SMOKE_SWEEPS[args.smoke]))
-        if args.layer_id is not None:
-            # Smoke-only cross-check that another sparse-MLA layer times like
-            # the representative one; full attempts always use the YAML layer.
-            sweep["layer_id"] = args.layer_id
-        if args.warmup is not None:
-            # Smoke-only study of the warmup length (GPU clock steady state).
-            sweep["warmup"] = args.warmup
-    else:
-        sweep = yaml.safe_load(Path(args.sweep).read_text())["common_case_values"][OP_NAME]
+    sweep = yaml.safe_load(Path(args.sweep).read_text())["common_case_values"][OP_NAME]
     representative_layer_is_uniform(config, sweep["layer_id"], args.checkpoint)
     plan = build_plan(sweep)
     selection = context_class_sets(plan, args.context_class)
@@ -151,7 +93,6 @@ def prepare(args) -> Path:
     body = {
         "schema_version": 2,
         "op": OP_NAME,
-        "role": "smoke" if args.smoke else "full",
         "geometry": geometry(config, args.backend, args.checkpoint, args.tp),
         "checkpoint_revision": CHECKPOINTS[args.checkpoint][1],
         "checkpoint_model_id": CHECKPOINTS[args.checkpoint][0],
@@ -181,23 +122,6 @@ def prepare(args) -> Path:
         # Split attempt: one deployment's plan measured by several attempts
         # whose set selections finalize unions exactly once.
         body["only_sets"] = sorted(selection)
-    if args.kv_token_capacity is not None:
-        # Sanctioned generation-time memory-feasibility filter: the measured
-        # KV pool and transient headroom of this deployment at this memory
-        # setting (size vs capacity only); dropped targets are never queued.
-        budget = {
-            "kv_tokens": args.kv_token_capacity,
-            "transient_gib": args.transient_gib,
-            "device_gib": args.device_gib,
-            "evidence": args.memory_evidence,
-        }
-        drops = memory_drops({**plan, "sets": selected}, budget)
-        total = sum(len(s["targets"]) for s in selected)
-        print(f"{OP_NAME}: dropped {len(drops)}/{total} cases (memory budget, device={args.device_gib}GB)")
-        for drop in drops:
-            print(f"  {drop['set_id']} {drop['key']}: {drop['reason']}")
-        body["memory_budget"] = budget
-        body["memory_drops"] = drops
     if args.sglang_mem_fraction is not None:
         body["sglang_mem_fraction_static"] = args.sglang_mem_fraction
     if args.vllm_gpu_memory_utilization is not None:
@@ -205,9 +129,7 @@ def prepare(args) -> Path:
     attempt.mkdir(parents=True, exist_ok=True)
     manifest = {**body, "manifest_sha256": sha256_json(body)}
     (attempt / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    suffix = (f"-smoke-{args.smoke}" if args.smoke else "") + (f"-{args.tag}" if args.tag else "")
-    suffix += f"-l{args.layer_id}" if args.layer_id is not None else ""
-    suffix += f"-w{args.warmup}" if args.warmup is not None else ""
+    suffix = f"-{args.tag}" if args.tag else ""
     job = f"glm53-attn-{args.backend}-{args.checkpoint}-tp{args.tp}{suffix}"
     container = f"{args.remote_attempt}"
     runner = f"collector.{args.backend}.glm53flash_attention_runner"
@@ -261,25 +183,6 @@ srun --container-image={args.image} --container-mounts={",".join(mounts)} --no-c
   exec {command}"
 """
     (attempt / "run.sbatch").write_text(script)
-    # CPU dry run in the same container and mounts: resolves the framework,
-    # manifest, checkpoint geometry and native arguments, then exits before
-    # any CUDA work, so a GPU allocation is never spent on a driver error.
-    dryrun = f"""#!/bin/bash
-#SBATCH --job-name={job}-dryrun
-#SBATCH --account={args.account}
-#SBATCH --partition=cpu
-#SBATCH --qos=cpu-short
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
-#SBATCH --time=00:30:00
-#SBATCH --output={container}/dryrun-%j.out
-set -euo pipefail
-srun --container-image={args.image} --container-mounts={",".join(mounts)} --no-container-mount-home \\
-  --container-workdir=/workspace bash -c "export {exports}; exec {command} --dry-run"
-"""
-    (attempt / "dryrun.sbatch").write_text(dryrun)
     return attempt
 
 
@@ -290,10 +193,7 @@ def main():
     parser.add_argument("--tp", type=int, choices=(1, 2, 4), required=True)
     parser.add_argument("--config", required=True, help="checkpoint config.json (pinned revision)")
     parser.add_argument("--sweep", default="collector/cases/base_ops/glm53flash_attention.yaml")
-    parser.add_argument("--smoke", choices=sorted(SMOKE_SWEEPS))
     parser.add_argument("--context-class", choices=("regular", "long"), default="regular")
-    parser.add_argument("--layer-id", type=int, help="smoke-only representative-layer cross-check")
-    parser.add_argument("--warmup", type=int, help="smoke-only warmup repetitions per target")
     parser.add_argument("--attempt", required=True, help="local fresh attempt directory")
     parser.add_argument("--remote-attempt", required=True)
     parser.add_argument("--remote-source", required=True, help="shared-storage copy of python/aisimulate")
@@ -309,20 +209,9 @@ def main():
     parser.add_argument("--only-sets", nargs="+", help="split attempt: measure only these plan sets")
     parser.add_argument("--skip-sets", nargs="+", help="split attempt: measure every other set of the class")
     parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=None)
-    parser.add_argument("--kv-token-capacity", type=int, help="measured KV pool tokens (memory-feasibility filter)")
-    parser.add_argument("--transient-gib", type=float, help="measured transient headroom (memory-feasibility filter)")
-    parser.add_argument("--device-gib", type=float, help="device memory (memory-feasibility log)")
-    parser.add_argument("--memory-evidence", default="", help="jobs/logs the budget was measured in")
     args = parser.parse_args()
-    if (args.layer_id is not None or args.warmup is not None) and not args.smoke:
-        parser.error("--layer-id and --warmup are smoke-only")
-    budget = (args.kv_token_capacity, args.transient_gib, args.device_gib)
-    if any(v is not None for v in budget) and (None in budget or not args.memory_evidence):
-        parser.error(
-            "the memory-feasibility filter needs --kv-token-capacity, --transient-gib, --device-gib, --memory-evidence"
-        )
-    if args.tp == 1 and args.checkpoint not in TP1_CHECKPOINTS:
-        parser.error("TP1 is NVFP4-only: the FP8 checkpoint's weights exceed one GB300")
+    if args.tp == 1 and (args.backend, args.checkpoint) not in TP1_DEPLOYMENTS:
+        parser.error("TP1 is collected for vLLM NVFP4 only (the FP8 weights exceed one GB300)")
     print(prepare(args))
 
 

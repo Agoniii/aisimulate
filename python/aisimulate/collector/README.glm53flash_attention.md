@@ -20,8 +20,9 @@ precedent in `sglang/README.dsv41.md`.
 | SGLang | `0.5.20` | stock `lmsysorg/sglang:v0.5.20` (tag commit `94602c9c`) |
 
 Image digests are pinned in `framework_manifest.yaml`. Checkpoints are
-`zai-org/GLM-5.3-Flash` (FP8 block-128) and `nvidia/GLM-5.3-Flash-NVFP4`; TP1
-is NVFP4-only because the FP8 weights do not fit one GB300.
+`zai-org/GLM-5.3-Flash` (FP8 block-128) and `nvidia/GLM-5.3-Flash-NVFP4`.
+Deployments are TP2/TP4 on both backends plus vLLM NVFP4 TP1 (the FP8 weights
+do not fit one GB300).
 
 ## Measured boundary
 
@@ -65,12 +66,12 @@ attempt measures one context class. Request token ids come from the seeded
 generator `glm53flash_attention_tokens.py`. KV, IndexPool and tail state are
 produced by the framework's own forward helpers.
 
-An attempt may carry its deployment's measured capacity (`--kv-token-capacity`,
-`--transient-gib`, `--device-gib`, `--memory-evidence`). This is the sanctioned
-generation-time memory filter: infeasible targets are never queued, and the
-launcher logs and freezes the drops in the manifest. A deployment's plan may be
-split across attempts with disjoint `--only-sets`; `finalize` admits them only
-if they cover every planned key exactly once.
+A deployment's plan may be split across attempts with disjoint `--only-sets`
+(capacity knobs such as `--vllm-gpu-memory-utilization`,
+`--sglang-mem-fraction` and `--allocator-max-split-mb` are frozen per
+manifest); `finalize` admits them only if they cover every planned key exactly
+once, with `--partial` for a failed attempt's completed targets and
+`--classified-failures` for keys that failed reproducibly.
 
 ## Data contract
 
@@ -95,15 +96,14 @@ within a phase.
 ## Running
 
 ```bash
-python -m collector.glm53flash_attention_launch --backend sglang --checkpoint nvfp4 --tp 1 \
+python -m collector.glm53flash_attention_launch --backend vllm --checkpoint nvfp4 --tp 1 \
   --config src/aisimulate_core/model_configs/nvidia--GLM-5.3-Flash-NVFP4_config.json \
-  [--context-class long] [--only-sets ...] [--smoke validation-sglang|validation-vllm|long] \
+  [--context-class long] [--only-sets ...] \
   --attempt <local dir> --remote-attempt <shared dir> --remote-source <shared collector copy> \
   --remote-model <checkpoint dir> --image <sqsh> --source-commit <sha>
-sbatch <shared dir>/dryrun.sbatch   # CPU: framework, manifest, geometry, native args
 sbatch <shared dir>/run.sbatch
 python -m collector.glm53flash_attention_contract finalize <attempt>... \
-  --output .../glm53_attention_module_perf.parquet --evidence <evidence.json>
+  --output .../glm53_attention_module_perf.parquet
 ```
 
 Sources: vLLM `models/glm5next/common/{attention,model}.py`,

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 from collector.glm53flash_attention_contract import build_plan
-from collector.glm53flash_attention_launch import SMOKE_SWEEPS, prepare
+from collector.glm53flash_attention_launch import prepare
 from collector.glm53flash_attention_tokens import (
     SEED,
     TOKENIZER_JSON_SHA256,
@@ -71,8 +71,6 @@ def test_count_covers_the_longest_request_and_window_offsets():
     full = build_plan(yaml.safe_load(SWEEP.read_text())["common_case_values"]["glm53flash_attention"])
     # The longest request is the ~1M long-context decode (L = 1048575).
     assert required_token_count(full) == 1048575 + 32 * 4099
-    smoke = build_plan(SMOKE_SWEEPS["validation-sglang"])
-    assert required_token_count(smoke) == 98048 + 256 + 32 * 4099
 
 
 def test_vocab_range_excludes_added_and_special_tokens():
@@ -84,7 +82,7 @@ def test_vocab_range_excludes_added_and_special_tokens():
 def test_manifest_tokens_check_the_pinned_tokenizer(tmp_path, monkeypatch):
     from collector import glm53flash_attention_tokens as tokens_module
 
-    plan = build_plan(SMOKE_SWEEPS["validation-vllm"])
+    plan = build_plan(yaml.safe_load(SWEEP.read_text())["common_case_values"]["glm53flash_attention"])
     manifest = {"plan": plan, "input_tokens": spec(plan)}
     (tmp_path / "tokenizer.json").write_text("{}")
     with pytest.raises(RuntimeError, match="not the pinned tokenizer"):
@@ -106,16 +104,9 @@ def test_launcher_freezes_the_generator_and_needs_no_corpus(tmp_path, backend):
     args = Namespace(
         attempt=tmp_path / "attempt",
         config=CONFIG,
-        smoke="validation-vllm",
         context_class="regular",
         tag="",
-        layer_id=None,
-        warmup=None,
-        kv_token_capacity=None,
-        transient_gib=None,
-        device_gib=None,
-        memory_evidence="",
-        sweep=None,
+        sweep=SWEEP,
         backend=backend,
         checkpoint="fp8",
         tp=2,
@@ -137,5 +128,4 @@ def test_launcher_freezes_the_generator_and_needs_no_corpus(tmp_path, backend):
     manifest = json.loads((attempt / "manifest.json").read_text())
     assert manifest["input_tokens"] == spec(manifest["plan"])
     assert manifest["input_tokens"]["tokenizer_json_sha256"] == TOKENIZER_JSON_SHA256
-    for script in ("run.sbatch", "dryrun.sbatch"):
-        assert "corpus" not in (attempt / script).read_text()
+    assert "corpus" not in (attempt / "run.sbatch").read_text()

@@ -7,7 +7,6 @@ from collector.glm53flash_attention_runtime import (
     REPETITION_RANGE,
     TimingAttributionError,
     attribute_repetitions,
-    kernel_samples,
 )
 
 pytestmark = pytest.mark.unit
@@ -49,39 +48,21 @@ def _graph_and_breaks(offset):
 
 def test_busy_union_excludes_host_gaps_and_counts_overlap_once():
     trace = _graph_and_breaks(0) + _graph_and_breaks(1000)
-    result = attribute_repetitions(trace, 2, device=0)
-    for stats in result["repetitions"]:
-        # gemm 20..30, norm+quant 31..40, then 80..105 (logits, side stream
-        # and memset overlap) -> 10 + 9 + 25 us busy; host gaps never count.
-        assert stats["busy_us"] == pytest.approx(44.0)
-        assert stats["kernel_us"] == pytest.approx(54.0)
-        assert stats["kernels"] == 5 and stats["memset"] == 1 and stats["memcpy"] == 0
-        assert stats["gpu_span_us"] == pytest.approx(85.0)
-        assert stats["time_only"] == 0
-    assert result["diagnostics"]["devices"] == [0]
-    for stats in result["repetitions"]:
-        stats["event_ms_profiled"] = 0.4  # KernelTimer adds the profiled event interval
-    latencies, timing = kernel_samples(result, [0.5, 0.6], warmup=1)
-    assert latencies == pytest.approx([0.044, 0.044])
-    assert timing["kernel_busy_ms"] == [0.044] and timing["event_ms_unprofiled"] == [0.6]
-    assert timing["kernel_count"] == [5]
-    assert timing["activity_us_by_name"]["mqa_logits"] == 20.0 and timing["activity_us_by_name"]["Memset"] == 1.0
+    # gemm 20..30, norm+quant 31..40, then 80..105 (logits, side stream and
+    # memset overlap) -> 10 + 9 + 25 us busy; host gaps never count.
+    assert attribute_repetitions(trace, 2, device=0) == pytest.approx([44.0, 44.0])
 
 
 def test_other_devices_and_activity_outside_repetitions_are_ignored():
     trace = _graph_and_breaks(0)
     trace.append(_gpu(99, 10.0, 5.0, device=1))
     trace += [_launch(500, 2000.0), _gpu(500, 2010.0, 50.0)]
-    result = attribute_repetitions(trace, 1, device=0)
-    assert result["repetitions"][0]["kernels"] == 5
-    assert result["diagnostics"]["outside"] == 1
+    assert attribute_repetitions(trace, 1, device=0) == pytest.approx([44.0])
 
 
-def test_kernels_without_launch_records_are_attributed_by_time_and_counted():
+def test_kernels_without_launch_records_are_attributed_by_time():
     trace = _graph_and_breaks(0) + [_gpu(None, 200.0, 10.0, name="untracked")]
-    stats = attribute_repetitions(trace, 1, device=0)["repetitions"][0]
-    assert stats["time_only"] == 1 and stats["kernels"] == 6
-    assert stats["busy_us"] == pytest.approx(54.0)
+    assert attribute_repetitions(trace, 1, device=0) == pytest.approx([54.0])
 
 
 def test_contradictions_and_foreign_work_fail():

@@ -208,11 +208,11 @@ def test_glm5_next_phase_router_matches_serving_decode_threshold():
     _exec_functions({"run_glm5_next_kda_torch"}, namespace)
     router = namespace["run_glm5_next_kda_torch"]
     args = (4096, 4, 16, 128, 16, 128, [1, 2])
-    router("context", *args, [1, 2, 131072], model_name="m")
+    router("context", *args, [1, 2, 32768], model_name="m")
     router("generation", *args, None, model_name="m")
     assert calls == [
         ("decode", "context", None),
-        ("context", None, [2, 131072]),
+        ("context", None, [2, 32768]),
         ("decode", "generation", None),
     ]
     with pytest.raises(NotImplementedError, match="verify"):

@@ -41,16 +41,14 @@ model_case_values:
     #   KDA fused q/k/v/b/f_a/g_a in-proj 3*8192/tp + 64/tp + 2*128:
     #     24896 (tp1), 12576 (tp2), 6416 (tp4)
     #   KDA b_proj 64/tp: 32 (tp2), 16 (tp4) (SGLang unfused path)
-    #   indexer wk (128) + weights_proj (32 heads) fused as SGLang's
-    #     wk_weights_proj: 160 (replicated; dsa_indexer.py:276 @v0.5.20)
-    #   router gate 288 (FP32 router; see the FP32 note below)
+    #   router gate 288 (priced as a BF16 GEMM)
     #   lm_head 154880/tp: 154880 (tp1), 77440 (tp2), 38720 (tp4)
     #   dense MLP gate_up 2*12288/tp: 24576 (tp1)
     - id: glm53flash_hidden_input_offgrid_widths
       model_path: zai-org/GLM-5.3-Flash
       model_aliases:
         - nvidia/GLM-5.3-Flash-NVFP4
-      output_feature_sizes: [16, 32, 160, 288, 6416, 12576, 24576, 24896, 38720, 77440, 154880]
+      output_feature_sizes: [16, 32, 288, 6416, 12576, 24576, 24896, 38720, 77440, 154880]
       input_feature_sizes: [4096]
 
   # Routed experts only (gate, shared expert and the TP all-reduce are

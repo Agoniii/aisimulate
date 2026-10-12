@@ -23,7 +23,6 @@ from collector.glm53flash_attention_contract import (
     context_class_sets,
     geometry,
     geometry_key,
-    indexer_regime,
     load_attempt,
     projection_quant_mode,
     representative_layer_is_uniform,
@@ -34,7 +33,6 @@ from collector.glm53flash_attention_contract import (
     validate_row,
     write_parquet,
 )
-from collector.glm53flash_attention_launch import SMOKE_SWEEPS
 from collector.glm53flash_attention_tokens import spec as input_token_spec
 
 pytestmark = pytest.mark.unit
@@ -46,6 +44,23 @@ CONFIGS = {
 }
 SWEEP = ROOT / "collector/cases/base_ops/glm53flash_attention.yaml"
 SHA = "a" * 64
+# A small aligned sweep with both IndexPool regimes and a long-context class.
+SMALL = {
+    "layer_id": 3,
+    "warmup": 3,
+    "iterations": 10,
+    "max_step_tokens": 8192,
+    "max_context": 131072,
+    "max_model_len": 131079,
+    "prefill": {"batch_sizes": [1, 4], "query_lengths": {"1": [32, 2048], "4": [256]}, "prefix_lengths": [0, 4096]},
+    "decode": {"batch_sizes": [1, 32], "sequence_lengths": {"1": [2048, 16384], "32": [4096]}},
+}
+LONG = {
+    "max_context": 1048575,
+    "max_model_len": 1048576,
+    "prefill": {"batch_sizes": [1], "query_lengths": {"1": [1024]}, "prefix_lengths": [1032192]},
+    "decode": {"batch_sizes": [1], "sequence_lengths": {"1": [1048575]}},
+}
 
 
 def config(checkpoint):
@@ -118,17 +133,6 @@ def test_geometry_key_is_the_model_operator_body(backend, checkpoint, tp):
         assert emitted == {geometry_key(attention_body(flat, is_context))}
 
 
-def test_indexer_regimes_split_at_topk():
-    assert indexer_regime("context", 0, 2048, 2048) == "short"
-    assert indexer_regime("context", 0, 2052, 2048) == "pooled"
-    assert indexer_regime("context", 1024, 1024, 2048) == "short"
-    assert indexer_regime("context", 1024, 1028, 2048) == "pooled"
-    assert indexer_regime("generation", 0, 2048, 2048) == "short"
-    assert indexer_regime("generation", 0, 2049, 2048) == "pooled"
-    with pytest.raises(ValueError):
-        indexer_regime("generation", 1, 10, 2048)
-
-
 def test_repository_plan_covers_both_regimes_inside_the_serving_budget():
     plan = build_plan(sweep())
     assert plan["layer_id"] == 3
@@ -138,8 +142,10 @@ def test_repository_plan_covers_both_regimes_inside_the_serving_budget():
     regular_plan = {**plan, "sets": [s for s in plan["sets"] if s["set_id"] in regular]}
     regular_keys = target_keys(regular_plan)
     assert len(regular_keys) == 454
-    regimes = {(phase, indexer_regime(phase, prefix, x, 2048)) for phase, _, prefix, x in keys}
-    assert regimes == {(p, r) for p in ("context", "generation") for r in ("short", "pooled")}
+    # Both IndexPool regimes (prefix + x <= index_topk selects every pool).
+    for phase in ("context", "generation"):
+        ends = {prefix + x for p, _, prefix, x in keys if p == phase}
+        assert min(ends) <= 2048 < max(ends)
     for request_set in plan["sets"]:
         batch = request_set["batch_size"]
         assert batch * request_set["seed_chunk"] <= plan["max_step_tokens"]
@@ -183,31 +189,18 @@ def test_seed_chunks_are_floored_to_the_index_pool():
 
 
 def test_plan_rejects_budget_overflow_and_reports_unaligned_targets():
-    bad = copy.deepcopy(SMOKE_SWEEPS["validation-vllm"])
+    bad = copy.deepcopy(SMALL)
     bad["prefill"]["query_lengths"]["4"] = [4096]
     with pytest.raises(ValueError, match="step budget"):
         build_plan(bad)
-    assert unaligned_targets(build_plan(SMOKE_SWEEPS["validation-vllm"])) == []
-    sglang = unaligned_targets(build_plan(SMOKE_SWEEPS["validation-sglang"]))
-    assert "prefill-b1-q2042-c0:prefix=0" in sglang and "prefill-b32-q10-c0:prefix=0" in sglang
-    long = copy.deepcopy(SMOKE_SWEEPS["long"])
+    assert unaligned_targets(build_plan(SMALL)) == []
+    unaligned = copy.deepcopy(SMALL)
+    unaligned["prefill"]["query_lengths"]["1"] = [2042]
+    assert "prefill-b1-q2042-c0:prefix=0" in unaligned_targets(build_plan(unaligned))
+    long = dict(copy.deepcopy(SMALL), long_context=copy.deepcopy(LONG))
     long["long_context"]["decode"]["sequence_lengths"]["1"] = [1048576]
     with pytest.raises(ValueError, match="must fit"):
         build_plan(long)
-
-
-def test_explicit_prefix_grids_select_exact_validation_geometries():
-    keys = set(target_keys(build_plan(SMOKE_SWEEPS["validation-sglang"])))
-    assert {k for k in keys if k[0] == "context"} == {
-        ("context", 1, 128, 32),
-        ("context", 1, 0, 2042),
-        ("context", 1, 0, 8189),
-        ("context", 4, 12032, 256),
-        ("context", 32, 0, 10),
-        ("context", 32, 4352, 32),
-        ("context", 32, 0, 250),
-        ("context", 32, 98048, 256),
-    }
 
 
 def _flat(backend="vllm", checkpoint="fp8", tp=2):
@@ -222,7 +215,6 @@ def _records(flat, phase, batch, prefix, x, latencies_by_rank, source=SHA, extra
         "batch_size": batch,
         "prefix": prefix,
         "x": x,
-        "indexer_regime": indexer_regime(phase, prefix, x, 2048),
     }
     provenance = {
         "framework_version": RUNTIME_VERSIONS[flat["backend"]],
@@ -255,7 +247,7 @@ def _records(flat, phase, batch, prefix, x, latencies_by_rank, source=SHA, extra
 def test_rank_maximum_then_median_and_published_schema():
     flat = _flat()
     records = _records(flat, "context", 2, 4096, 256, [[1.0, 5.0, 2.0], [3.0, 1.0, 1.0]])
-    rows, evidence = aggregate_rank_samples(records, 2)
+    rows = aggregate_rank_samples(records, 2)
     assert len(rows) == 1
     row = rows[0]
     assert tuple(row) == COLUMNS
@@ -263,11 +255,7 @@ def test_rank_maximum_then_median_and_published_schema():
     assert row["latency"] == 3.0 and row["sample_count"] == 3
     assert row["measurement_scope"] == "local_compute" and row["execution_profile"] == "full"
     assert row["used_cuda_graph"] is True and row["kv_seed_regime"] == "real_kv"
-    assert evidence[0]["rank_max_ms"] == [3.0, 5.0, 2.0]
-    assert evidence[0]["timing_method"] == KERNEL_PREFILL
-    assert evidence[0]["latency_cv"] == pytest.approx(0.3742, abs=1e-4)
-    assert evidence[0]["indexer_regime"] == "pooled"
-    decode, _ = aggregate_rank_samples(_records(flat, "generation", 4, 0, 4096, [[1.0], [2.0]]), 2)
+    decode = aggregate_rank_samples(_records(flat, "generation", 4, 0, 4096, [[1.0], [2.0]]), 2)
     assert decode[0]["used_cuda_graph"] is True and decode[0]["prefix"] == 0
 
 
@@ -297,8 +285,8 @@ def test_writer_emits_the_reader_schema_and_rejects_duplicates_and_mixed_provena
     for checkpoint in ("fp8", "nvfp4"):
         for tp in (2, 4):
             flat = _flat(checkpoint=checkpoint, tp=tp)
-            rows += aggregate_rank_samples(_records(flat, "context", 1, 0, 2048, [[1.0]] * tp), tp)[0]
-            rows += aggregate_rank_samples(_records(flat, "generation", 1, 0, 2049, [[0.1]] * tp), tp)[0]
+            rows += aggregate_rank_samples(_records(flat, "context", 1, 0, 2048, [[1.0]] * tp), tp)
+            rows += aggregate_rank_samples(_records(flat, "generation", 1, 0, 2049, [[0.1]] * tp), tp)
     table = _table(tmp_path, rows)
     assert table.schema.names == list(COLUMNS)
     assert table.schema.field("batch_size").type == pa.int64()
@@ -309,7 +297,7 @@ def test_writer_emits_the_reader_schema_and_rejects_duplicates_and_mixed_provena
         write_parquet(rows + rows[:1], tmp_path / "dup.parquet")
     other_source = aggregate_rank_samples(
         _records(_flat(tp=2), "context", 2, 0, 16, [[1.0], [1.0]], source="b" * 64), 2
-    )[0]
+    )
     with pytest.raises(ValueError, match="one backend/runtime/source"):
         write_parquet(rows + other_source, tmp_path / "mixed.parquet")
     for row in rows[:2]:
@@ -323,7 +311,7 @@ def test_writer_emits_the_reader_schema_and_rejects_duplicates_and_mixed_provena
 
 def test_rows_the_reader_would_reject_fail_before_publication():
     flat = _flat()
-    row = aggregate_rank_samples(_records(flat, "generation", 1, 0, 4096, [[1.0], [1.0]]), 2)[0][0]
+    row = aggregate_rank_samples(_records(flat, "generation", 1, 0, 4096, [[1.0], [1.0]]), 2)[0]
     validate_row(row)
     for change in (
         {"prefix": 7},
@@ -344,14 +332,13 @@ def test_rows_the_reader_would_reject_fail_before_publication():
             validate_row(dict(row, geometry=geometry_key(dict(body, **change))))
 
 
-def _attempt(tmp_path, role="full", only_sets=None, name=None, sweep_spec=None, max_model_len=None):
+def _attempt(tmp_path, only_sets=None, name="full", sweep_spec=None, max_model_len=None):
     flat = _flat()
-    sweep_spec = sweep_spec or SMOKE_SWEEPS["validation-vllm"]
+    sweep_spec = sweep_spec or SMALL
     plan = build_plan(sweep_spec)
     body = {
         "schema_version": 2,
         "op": "glm53flash_attention",
-        "role": role,
         "geometry": flat,
         "checkpoint_revision": "rev",
         "framework_version": RUNTIME_VERSIONS["vllm"],
@@ -366,7 +353,7 @@ def _attempt(tmp_path, role="full", only_sets=None, name=None, sweep_spec=None, 
         body["only_sets"] = sorted(only_sets)
         plan = {**plan, "sets": [s for s in plan["sets"] if s["set_id"] in only_sets]}
     body["max_model_len"] = max_model_len or plan["sets"][0]["max_model_len"]
-    attempt = tmp_path / (name or role)
+    attempt = tmp_path / name
     raw = attempt / "raw"
     raw.mkdir(parents=True)
     (attempt / "manifest.json").write_text(json.dumps({**body, "manifest_sha256": sha256_json(body)}))
@@ -382,11 +369,8 @@ def _attempt(tmp_path, role="full", only_sets=None, name=None, sweep_spec=None, 
 
 def test_attempt_admission_requires_every_planned_target(tmp_path):
     attempt, records = _attempt(tmp_path)
-    manifest, rows, evidence = load_attempt(attempt)
-    assert len(rows) == len(evidence) == len(target_keys(manifest["plan"]))
-    smoke, _ = _attempt(tmp_path, role="smoke")
-    with pytest.raises(ValueError, match="only full attempts publish"):
-        load_attempt(smoke)
+    manifest, rows = load_attempt(attempt)
+    assert len(rows) == len(target_keys(manifest["plan"]))
     lines = (attempt / "raw/rank-1.jsonl").read_text().splitlines()
     missing_target = records[0]["target_id"]
     kept = [line for line in lines if json.loads(line)["target_id"] != missing_target]
@@ -395,49 +379,27 @@ def test_attempt_admission_requires_every_planned_target(tmp_path):
         load_attempt(attempt)
 
 
-def test_finalize_writes_table_evidence_and_collection_sidecar(tmp_path, monkeypatch):
-    from collector import glm53flash_attention_contract as contract
-
-    attempt, _ = _attempt(tmp_path)
-    output = tmp_path / "data/gb300/glm53_attention/vllm" / RUNTIME_VERSIONS["vllm"] / BASENAME
-    evidence = tmp_path / "evidence.json"
-    monkeypatch.setattr(
-        "sys.argv", ["x", "finalize", str(attempt), "--output", str(output), "--evidence", str(evidence)]
-    )
-    contract.main()
-    assert pq.read_table(output).num_rows == len(target_keys(build_plan(SMOKE_SWEEPS["validation-vllm"])))
-    meta = yaml.safe_load((output.parent / "collection_meta.yaml").read_text())
-    table = meta["tables"]["glm53_attention_module_perf"]
-    assert meta["runtime"]["image_digest"] == RUNTIME_IMAGES["vllm"]
-    assert table["rows"] == pq.read_table(output).num_rows and len(table["data_sha256"]) == 64
-    assert json.loads(evidence.read_text())["attempts"][0]["deployment"] == "fp8-tp2"
-    assert table["input_tokens"] == {
-        "source": "seeded_random_tokens",
-        **input_token_spec(build_plan(SMOKE_SWEEPS["validation-vllm"])),
-    }
-    assert table["timing_method"] == {"context": [KERNEL_PREFILL], "generation": [KERNEL_DECODE]}
-    assert table["attempts"][0]["max_model_len"] == 131079
-
-
 def test_regular_and_long_context_attempts_finalize_into_one_table(tmp_path, monkeypatch):
     from collector import glm53flash_attention_contract as contract
 
-    spec = copy.deepcopy(SMOKE_SWEEPS["validation-vllm"])
-    spec["long_context"] = copy.deepcopy(SMOKE_SWEEPS["long"]["long_context"])
-    spec["long_context"]["decode"]["sequence_lengths"]["1"] = [1048575]
+    spec = dict(copy.deepcopy(SMALL), long_context=copy.deepcopy(LONG))
     plan = build_plan(spec)
     regular, long = context_class_sets(plan, "regular"), context_class_sets(plan, "long")
     first, _ = _attempt(tmp_path, only_sets=regular, name="regular", sweep_spec=spec)
     second, _ = _attempt(tmp_path, only_sets=long, name="long", sweep_spec=spec)
     assert load_attempt(second)[0]["max_model_len"] == 1048576
-    out = tmp_path / "t" / BASENAME
-    argv = ["x", "finalize", str(first), str(second), "--output", str(out), "--evidence", str(tmp_path / "e.json")]
-    monkeypatch.setattr("sys.argv", argv)
+    out = tmp_path / "data/gb300/glm53_attention/vllm" / RUNTIME_VERSIONS["vllm"] / BASENAME
+    monkeypatch.setattr("sys.argv", ["x", "finalize", str(first), str(second), "--output", str(out)])
     contract.main()
     assert pq.read_table(out).num_rows == len(target_keys(plan))
     meta = yaml.safe_load((out.parent / "collection_meta.yaml").read_text())
-    limits = [a["max_model_len"] for a in meta["tables"]["glm53_attention_module_perf"]["attempts"]]
-    assert limits == [131079, 1048576]
+    table = meta["tables"]["glm53_attention_module_perf"]
+    assert meta["runtime"]["image_digest"] == RUNTIME_IMAGES["vllm"]
+    assert table["rows"] == len(target_keys(plan)) and len(table["data_sha256"]) == 64
+    assert table["input_tokens"] == {"source": "seeded_random_tokens", **input_token_spec(plan)}
+    assert table["timing_method"] == {"context": [KERNEL_PREFILL], "generation": [KERNEL_DECODE]}
+    assert [a["max_model_len"] for a in table["attempts"]] == [131079, 1048576]
+    assert table["attempts"][0]["deployment"] == "fp8-tp2"
     wrong, _ = _attempt(tmp_path, only_sets=long, name="wrong", sweep_spec=spec, max_model_len=131079)
     with pytest.raises(ValueError, match="max_model_len"):
         load_attempt(wrong)
@@ -449,14 +411,14 @@ def test_regular_and_long_context_attempts_finalize_into_one_table(tmp_path, mon
 def test_split_attempts_must_cover_the_plan_exactly_once(tmp_path, monkeypatch):
     from collector import glm53flash_attention_contract as contract
 
-    plan = build_plan(SMOKE_SWEEPS["validation-vllm"])
+    plan = build_plan(SMALL)
     sets = [s["set_id"] for s in plan["sets"]]
     assert len(sets) >= 2
     first, _ = _attempt(tmp_path, only_sets=sets[:-1], name="a")
     last, _ = _attempt(tmp_path, only_sets=sets[-1:], name="b")
     assert load_attempt(last)[1]
     out = tmp_path / "t" / BASENAME
-    base = ["x", "finalize", "--output", str(out), "--evidence", str(tmp_path / "e.json")]
+    base = ["x", "finalize", "--output", str(out)]
     monkeypatch.setattr("sys.argv", base[:2] + [str(first), str(last)] + base[2:])
     contract.main()
     rows = pq.read_table(out).to_pylist()
@@ -481,16 +443,9 @@ def _launch_args(tmp_path, name, **overrides):
     values = {
         "attempt": tmp_path / name,
         "config": CONFIGS["nvfp4"],
-        "smoke": None,
         "sweep": SWEEP,
         "context_class": "regular",
         "tag": "",
-        "layer_id": None,
-        "warmup": None,
-        "kv_token_capacity": None,
-        "transient_gib": None,
-        "device_gib": None,
-        "memory_evidence": "",
         "backend": "vllm",
         "checkpoint": "nvfp4",
         "tp": 1,
@@ -521,61 +476,20 @@ def test_launch_selects_one_context_class_and_guards_vllm_alignment(tmp_path):
     assert "glm53-attn-vllm-nvfp4-tp1" in run
     long = json.loads((prepare(_launch_args(tmp_path, "l", context_class="long")) / "manifest.json").read_text())
     assert long["max_model_len"] == 1048576 and all(s.startswith("long-") for s in long["only_sets"])
-    sglang = prepare(_launch_args(tmp_path, "s", backend="sglang", context_class="long"))
+    sglang = prepare(_launch_args(tmp_path, "s", backend="sglang", tp=2, context_class="long"))
     assert "--context-length 1048576" in (sglang / "run.sbatch").read_text()
+    unaligned = tmp_path / "unaligned.yaml"
+    spec = copy.deepcopy(SMALL)
+    spec["prefill"]["query_lengths"]["1"] = [2042]
+    unaligned.write_text(yaml.safe_dump({"common_case_values": {"glm53flash_attention": spec}}))
     with pytest.raises(SystemExit, match="kpool_align4"):
-        prepare(_launch_args(tmp_path, "v", smoke="validation-sglang", sweep=None))
-    smoke = prepare(_launch_args(tmp_path, "g", smoke="validation-sglang", sweep=None, backend="sglang"))
-    assert json.loads((smoke / "manifest.json").read_text())["role"] == "smoke"
-
-
-def test_memory_feasibility_drops_are_generation_time_and_close_the_plan(tmp_path, monkeypatch, capsys):
-    from collector import glm53flash_attention_contract as contract
-    from collector.glm53flash_attention_contract import memory_drops, queued_plan
-    from collector.glm53flash_attention_launch import prepare
-
-    budget = {"kv_tokens": 3396928, "transient_gib": 18.0}
-    drops = memory_drops(build_plan(sweep()), budget)
-    assert {tuple(d["key"]) for d in drops} == {("context", 32, 98304, q) for q in (8, 32, 64, 128, 256)} | {
-        ("generation", 32, 0, 98304),
-        ("generation", 32, 0, 131072),
-    }
-    args = _launch_args(
-        tmp_path,
-        "m",
-        backend="sglang",
-        only_sets=["decode-b32", "prefill-b32-q8-c0"],
-        kv_token_capacity=3396928,
-        transient_gib=18.0,
-        device_gib=276.6,
-        memory_evidence="measured capacity log",
-    )
-    manifest = json.loads((prepare(args) / "manifest.json").read_text())
-    assert "glm53flash_attention: dropped 3/" in capsys.readouterr().out
-    queued = queued_plan(manifest)
-    decode = next(s for s in queued["sets"] if s["set_id"] == "decode-b32")
-    assert 131072 not in decode["targets"] and 4096 in decode["targets"]
-    with pytest.raises(ValueError, match="memory drops"):
-        queued_plan({**manifest, "memory_drops": []})
-    # Finalize admits the attempt when it measured exactly the queued targets.
-    attempt = tmp_path / "attempt-m"
-    raw = attempt / "raw"
-    raw.mkdir(parents=True)
-    (attempt / "manifest.json").write_text(json.dumps(manifest))
-    body = manifest
-    flat = manifest["geometry"]
-    records = []
-    for phase, batch, prefix, x in target_keys(queued_plan(body)):
-        records += _records(flat, phase, batch, prefix, x, [[1.0]])
-    (raw / "rank-0.jsonl").write_text("\n".join(json.dumps(r) for r in records) + "\n")
-    (raw / "COMPLETE").write_text("done\n")
-    assert len(contract.load_attempt(attempt)[1]) == len(records)
+        prepare(_launch_args(tmp_path, "v", sweep=unaligned))
 
 
 def test_partial_attempt_admits_only_its_complete_sets(tmp_path, monkeypatch):
     from collector import glm53flash_attention_contract as contract
 
-    plan = build_plan(SMOKE_SWEEPS["validation-vllm"])
+    plan = build_plan(SMALL)
     sets = [s["set_id"] for s in plan["sets"]]
     failed_set = sets[-1]
     broken, _ = _attempt(tmp_path, name="broken")
@@ -589,23 +503,13 @@ def test_partial_attempt_admits_only_its_complete_sets(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="no failed set"):
         load_attempt(broken, partial=True)
     (broken / "raw/progress.jsonl").write_text(json.dumps({"set_id": failed_set, "status": "failed"}) + "\n")
-    manifest, rows, _ = load_attempt(broken, partial=True)
+    manifest, rows = load_attempt(broken, partial=True)
     assert manifest["failed_sets"] == [failed_set] and failed_set not in manifest["admitted_sets"]
     assert len(rows) == len(target_keys(plan)) - len(lost)
     # The rerun covers the failed set; the partial copy of its other targets is superseded.
     rerun, _ = _attempt(tmp_path, only_sets=[failed_set, sets[0]], name="rerun")
     out = tmp_path / "p" / BASENAME
-    argv = [
-        "x",
-        "finalize",
-        str(rerun),
-        "--partial",
-        str(broken),
-        "--output",
-        str(out),
-        "--evidence",
-        str(tmp_path / "e"),
-    ]
+    argv = ["x", "finalize", str(rerun), "--partial", str(broken), "--output", str(out)]
     monkeypatch.setattr("sys.argv", argv)
     contract.main()
     assert pq.read_table(out).num_rows == len(target_keys(plan))
@@ -617,14 +521,14 @@ def test_partial_attempt_admits_only_its_complete_sets(tmp_path, monkeypatch):
 def test_classified_failures_are_explicit_gaps(tmp_path, monkeypatch):
     from collector import glm53flash_attention_contract as contract
 
-    plan = build_plan(SMOKE_SWEEPS["validation-vllm"])
+    plan = build_plan(SMALL)
     sets = [s["set_id"] for s in plan["sets"]]
     first, _ = _attempt(tmp_path, only_sets=sets[:-1], name="a")
     gap = [list(k) for k in target_keys({"sets": plan["sets"][-1:]})]
     classified = tmp_path / "classified.json"
     out = tmp_path / "c" / BASENAME
-    argv = ["x", "finalize", str(first), "--output", str(out), "--evidence", str(tmp_path / "e")]
-    entries = [{"deployment": "fp8-tp2", "key": k, "reason": "OOM", "evidence": ["job 1"]} for k in gap]
+    argv = ["x", "finalize", str(first), "--output", str(out)]
+    entries = [{"deployment": "fp8-tp2", "key": k, "reason": "OOM", "evidence": ["log"]} for k in gap]
     classified.write_text(json.dumps(entries))
     monkeypatch.setattr("sys.argv", argv + ["--classified-failures", str(classified)])
     contract.main()

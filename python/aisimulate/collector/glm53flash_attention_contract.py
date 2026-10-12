@@ -107,7 +107,7 @@ TIMING_METHODS = {
     "generation": {KERNEL_DECODE: True},
 }
 # Documented properties of the published tables (collection_meta.yaml notes).
-_COMMON_NOTES = [
+TABLE_NOTES = [
     "IndexPool alignment: every prefill chunk starts on a multiple of 4 (the stock vLLM 0.31.0 "
     "defect's trigger); decode rows keep their true sequence length L (prompt L-1, whose last seeding "
     "chunk may end off the pool grid and completes in the tail as in serving).",
@@ -115,20 +115,6 @@ _COMMON_NOTES = [
     "prefix >= 262144, decode x >= 262144, B=1) at the model limit 1048576 are table-extrapolation "
     "coverage. Each attempt's limit is its max_model_len.",
 ]
-TABLE_NOTES = {
-    "vllm": _COMMON_NOTES
-    + [
-        "Known bias: kernel-only rows read 2-12% (median 6%) above the per-layer MLA kernels of stock "
-        "vllm serve under nsys (fp8-tp2, nvfp4-tp4; 7 points each). Per kernel, the cuBLAS (nvjet) "
-        "projection GEMMs run 5-18% slower in the standalone module replay while fmha and fwht match; "
-        "200 warmup repetitions do not change it. Same standalone-op method as the other tables.",
-    ],
-    "sglang": _COMMON_NOTES
-    + [
-        "Validation: kernel-only rows are 0.93-1.02x (one point 1.105x) the per-layer MLA kernels of "
-        "the SGLang serving node traces at 8 geometries x 4 deployments.",
-    ],
-}
 # Capacity-only attempt settings (memory pool sizes, allocator split); they
 # never change a kernel, bucket or schedule and are frozen per manifest.
 CAPACITY_KNOBS = ("vllm_gpu_memory_utilization", "sglang_mem_fraction_static", "allocator_max_split_size_mb")
@@ -260,25 +246,6 @@ def attention_body(flat: dict, is_context: bool) -> dict:
 def geometry_key(body: dict) -> str:
     """serde_json of a sorted map: identical to the Rust ``geometry()``."""
     return json.dumps(body, sort_keys=True, separators=(",", ":"))
-
-
-def indexer_regime(phase: str, prefix: int, x: int, index_topk: int) -> str:
-    """Short-prefix regimes select every pool without MQA scoring.
-
-    vLLM 0.31.0 skips scoring when the batch's maximum prefill sequence
-    (prefix + query; models/glm5next/nvidia/sparse_indexer.py:250-271) or
-    decode sequence length (common/sparse_indexer.py:116-129) is at most
-    ``topk_tokens``; SGLang dsa_indexer_kpool.py skips extend logits when
-    ``max_kv_len <= index_topk``. The key keeps both regimes apart so a curve
-    never interpolates across that discontinuity.
-    """
-    if phase == "context":
-        return "short" if prefix + x <= index_topk else "pooled"
-    if phase == "generation":
-        if prefix:
-            raise ValueError("decode rows use absolute sequence length x with prefix=0")
-        return "short" if x <= index_topk else "pooled"
-    raise ValueError(f"unknown phase {phase!r}")
 
 
 def seed_chunk(budget: int, batch: int) -> int:
@@ -520,18 +487,17 @@ def physical_key(row: dict) -> tuple:
     return tuple(row[c] for c in KEY_COLUMNS)
 
 
-def aggregate_rank_samples(records: list[dict], tp_size: int) -> tuple[list[dict], list[dict]]:
+def aggregate_rank_samples(records: list[dict], tp_size: int) -> list[dict]:
     """Median over repetitions of the per-repetition maximum across TP ranks.
 
     Each raw record is one rank's timing of one repetition of one target. A
     target is admitted only when every rank reported the same repetition set
     with identical invocation identity; duplicate ranks/repetitions fail.
-    Returns the published rows and adjacent per-row evidence.
     """
     groups = defaultdict(list)
     for record in records:
         groups[record["target_id"]].append(record)
-    rows, evidence = [], []
+    rows = []
     for target, items in sorted(groups.items()):
         identity_fields = ("key", "provenance", "kernel_source", "timing_method", "used_cuda_graph")
         identities = {canonical_json({k: item[k] for k in identity_fields}) for item in items}
@@ -575,24 +541,7 @@ def aggregate_rank_samples(records: list[dict], tp_size: int) -> tuple[list[dict
         if TIMING_METHODS[phase].get(first["timing_method"]) != row["used_cuda_graph"]:
             raise ValueError(f"target {target} used an unexpected timing method")
         rows.append(row)
-        evidence.append(
-            {
-                "target_id": target,
-                "geometry": row["geometry"],
-                "batch_size": row["batch_size"],
-                "prefix": row["prefix"],
-                "x": row["x"],
-                "indexer_regime": indexer_regime(phase, row["prefix"], row["x"], body["index_topk"]),
-                "latency_min": float(min(maxima)),
-                "latency_max": float(max(maxima)),
-                "latency_cv": float(statistics.pstdev(maxima) / statistics.fmean(maxima)),
-                "rank_max_ms": maxima,
-                "timing_method": first["timing_method"],
-                **{k: provenance[k] for k in ("framework_version", "checkpoint_revision", "layer_id")},
-                "extra": sorted({canonical_json(item["extra"]) for item in items}),
-            }
-        )
-    return rows, evidence
+    return rows
 
 
 def validate_table(rows: list[dict]) -> None:
@@ -665,67 +614,12 @@ def selected_plan(manifest: dict) -> dict:
     return {**plan, "sets": [s for s in plan["sets"] if s["set_id"] in set(only)]}
 
 
-def _target_context(request_set: dict, value: int) -> tuple[tuple, int]:
-    batch = request_set["batch_size"]
-    if request_set["phase"] == "context":
-        return ("context", batch, value, request_set["query"]), value + request_set["query"]
-    return ("generation", batch, 0, value), value
-
-
-def memory_drops(plan: dict, budget: dict | None) -> list[dict]:
-    """Generation-time memory-feasibility filter (layer_permissions.md).
-
-    ``budget`` holds the deployment's measured capacity: ``kv_tokens`` (the
-    framework's KV pool size at the attempt's memory setting) and
-    ``transient_gib`` (device memory left for transient buffers). A target is
-    never queued when its live KV (``batch * context`` tokens) exceeds the pool,
-    or when the IndexPool MQA logits of one full step at its context
-    (``step_tokens * batch * ceil(context / index_pool) * 4`` bytes: one fp32
-    logit per pool for every query token of the step against every request's
-    pooled keys) exceed the transient memory. Size vs capacity only.
-    """
-    if not budget:
-        return []
-    drops = []
-    for request_set in plan["sets"]:
-        batch = request_set["batch_size"]
-        for value in request_set["targets"]:
-            key, context = _target_context(request_set, value)
-            kv = batch * context
-            logits = plan["max_step_tokens"] * batch * -(-context // KPOOL_ALIGN) * 4
-            reasons = []
-            if kv > budget["kv_tokens"]:
-                reasons.append(f"kv {kv} tokens > pool {budget['kv_tokens']}")
-            if logits > budget["transient_gib"] * 2**30:
-                reasons.append(f"mqa logits {logits / 2**30:.1f} GiB > {budget['transient_gib']} GiB")
-            if reasons:
-                drops.append({"set_id": request_set["set_id"], "key": list(key), "reason": "; ".join(reasons)})
-    return drops
-
-
-def queued_plan(manifest: dict) -> dict:
-    """The attempt's selected sets without its memory-dropped targets."""
-    plan = selected_plan(manifest)
-    dropped = manifest.get("memory_drops") or []
-    if dropped != memory_drops(plan, manifest.get("memory_budget")):
-        raise ValueError("manifest memory drops differ from its memory budget")
-    gone = {(d["set_id"], tuple(d["key"])) for d in dropped}
-    sets = []
-    for request_set in plan["sets"]:
-        keep = [
-            v for v in request_set["targets"] if (request_set["set_id"], _target_context(request_set, v)[0]) not in gone
-        ]
-        if keep:
-            sets.append({**request_set, "targets": keep})
-    return {**plan, "sets": sets}
-
-
 def check_split_closure(attempts: list[tuple[dict, list[dict]]], classified: list[dict] | None = None) -> None:
     """Attempts of one deployment must cover its planned keys exactly once.
 
-    Planned keys are excluded only by an attempt's memory drops or by an
-    explicit classified failure (deployment, key, reason, evidence); a
-    classified key that was measured is a contradiction.
+    Planned keys are excluded only by an explicit classified failure
+    (deployment, key, reason, evidence); a classified key that was measured is
+    a contradiction.
     """
     by_deployment: dict[tuple, list[tuple[dict, list[dict]]]] = {}
     for manifest, rows in attempts:
@@ -741,22 +635,21 @@ def check_split_closure(attempts: list[tuple[dict, list[dict]]], classified: lis
             if keys & seen:
                 raise ValueError(f"{deployment} attempts measure a key twice")
             seen |= keys
-        dropped = {tuple(d["key"]) for m, _ in group for d in m.get("memory_drops") or []}
         name = f"{deployment[0]}-tp{deployment[1]}"
         failed = {tuple(c["key"]) for c in classified or [] if c["deployment"] == name}
         planned = set(target_keys(group[0][0]["plan"]))
-        if not failed <= planned - dropped:
+        if not failed <= planned:
             raise ValueError(f"{deployment} classified failures are not queued planned keys")
         bodies = {geometry_key(attention_body(group[0][0]["geometry"], ph == "context")): ph for ph in PHASES}
         measured = {(bodies[k[0]], k[1], k[2], k[3]) for k in seen}
         if measured & failed:
             raise ValueError(f"{deployment} classified failures were measured: {sorted(measured & failed)[:3]}")
-        wanted = [key for key in planned if key not in dropped and key not in failed]
+        wanted = [key for key in planned if key not in failed]
         if len(seen) != len(wanted):
             raise ValueError(f"{deployment} attempts cover {len(seen)} of {len(wanted)} planned keys")
 
 
-def load_attempt(attempt: Path, partial: bool = False) -> tuple[dict, list[dict], list[dict]]:
+def load_attempt(attempt: Path, partial: bool = False) -> tuple[dict, list[dict]]:
     """Admit one runner attempt: completion receipt, plan closure, every target.
 
     ``attempt`` holds the frozen ``manifest.json``; the runner's per-rank
@@ -779,8 +672,6 @@ def load_attempt(attempt: Path, partial: bool = False) -> tuple[dict, list[dict]
     plan = manifest["plan"]
     if plan != build_plan(manifest["sweep"]):
         raise ValueError(f"{attempt} plan differs from its frozen sweep")
-    if manifest["role"] != "full":
-        raise ValueError(f"{attempt} is a {manifest['role']} attempt; only full attempts publish")
     tp_size = manifest["geometry"]["tp_size"]
     paths = sorted(raw.glob("rank-*.jsonl"))
     if {p.name for p in paths} != {f"rank-{rank}.jsonl" for rank in range(tp_size)}:
@@ -793,7 +684,7 @@ def load_attempt(attempt: Path, partial: bool = False) -> tuple[dict, list[dict]
             raise ValueError(f"{attempt} sample geometry differs from its deployment")
         if record["provenance"]["layer_id"] != manifest["layer_id"]:
             raise ValueError(f"{attempt} sample layer differs from the manifest")
-    queued = queued_plan(manifest)
+    queued = selected_plan(manifest)
     if partial:
         failed = set()
         for path in raw.glob("progress*.jsonl"):
@@ -818,8 +709,11 @@ def load_attempt(attempt: Path, partial: bool = False) -> tuple[dict, list[dict]
         for request_set in queued["sets"]:
             keep = []
             for value in request_set["targets"]:
-                phase, batch, prefix, x = _target_context(request_set, value)[0]
-                if f"{phase}-b{batch}-p{prefix}-x{x}" in full:
+                if request_set["phase"] == "context":
+                    key = ("context", request_set["batch_size"], value, request_set["query"])
+                else:
+                    key = ("generation", request_set["batch_size"], 0, value)
+                if "{}-b{}-p{}-x{}".format(*key) in full:
                     keep.append(value)
             if keep:
                 sets.append({**request_set, "targets": keep})
@@ -836,7 +730,7 @@ def load_attempt(attempt: Path, partial: bool = False) -> tuple[dict, list[dict]
             "admitted_sets": admitted,
             "failed_sets": sorted(failed),
         }
-    rows, evidence = aggregate_rank_samples(records, tp_size)
+    rows = aggregate_rank_samples(records, tp_size)
     measured = {(bodies[r["geometry"]], r["batch_size"], r["prefix"], r["x"]) for r in rows}
     expected = set(target_keys(queued))
     if manifest["max_model_len"] != selected_max_model_len(manifest):
@@ -845,7 +739,7 @@ def load_attempt(attempt: Path, partial: bool = False) -> tuple[dict, list[dict]
         missing = sorted(expected - measured)[:4]
         extra = sorted(measured - expected)[:4]
         raise ValueError(f"{attempt} measured keys differ from its plan: missing {missing}, unplanned {extra}")
-    return manifest, rows, evidence
+    return manifest, rows
 
 
 def _execution_modes(rows: list[dict]) -> dict[str, str]:
@@ -861,8 +755,6 @@ def _execution_modes(rows: list[dict]) -> dict[str, str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    plan_parser = sub.add_parser("plan", help="print the frozen plan for a sweep YAML")
-    plan_parser.add_argument("--sweep", type=Path, required=True)
     finalize = sub.add_parser("finalize", help="merge admitted attempts into one backend/version table")
     finalize.add_argument("attempts", type=Path, nargs="*")
     finalize.add_argument(
@@ -872,36 +764,23 @@ def main() -> None:
         "--partial", type=Path, action="append", default=[], help="failed attempt: admit its completed sets only"
     )
     finalize.add_argument("--output", type=Path, required=True)
-    finalize.add_argument("--evidence", type=Path, required=True, help="per-row sample evidence JSON")
     args = parser.parse_args()
-    if args.command == "plan":
-        import yaml
-
-        sweep = yaml.safe_load(args.sweep.read_text())["common_case_values"][OP_NAME]
-        plan = build_plan(sweep)
-        print(json.dumps({"plan_sha256": plan["plan_sha256"], "targets": len(target_keys(plan))}))
-        return
-    rows, evidence, manifests, loaded = [], [], [], []
+    rows, manifests, loaded = [], [], []
     complete_keys: set[tuple] = set()
     for attempt, partial in [(a, False) for a in args.attempts] + [(a, True) for a in args.partial]:
-        manifest, attempt_rows, attempt_evidence = load_attempt(attempt, partial=partial)
+        manifest, attempt_rows = load_attempt(attempt, partial=partial)
         superseded = 0
         if partial:
             # A key also measured by a complete (fresh-process) attempt, or by
             # a partial attempt listed earlier, is taken from that attempt.
             kept = [r for r in attempt_rows if physical_key(r) not in complete_keys]
             superseded = len(attempt_rows) - len(kept)
-            keys = {physical_key(r) for r in kept}
-            complete_keys |= keys
+            complete_keys |= {physical_key(r) for r in kept}
             attempt_rows = kept
-            attempt_evidence = [
-                e for e in attempt_evidence if (e["geometry"], e["batch_size"], e["prefix"], e["x"]) in keys
-            ]
         else:
             complete_keys |= {physical_key(r) for r in attempt_rows}
         loaded.append((manifest, attempt_rows))
         rows += attempt_rows
-        evidence += [{**e, "attempt": Path(attempt).name} for e in attempt_evidence]
         manifests.append(
             {
                 "attempt": Path(attempt).name,
@@ -923,11 +802,6 @@ def main() -> None:
                     if partial
                     else {}
                 ),
-                **(
-                    {"memory_budget": manifest["memory_budget"], "memory_drops": manifest["memory_drops"]}
-                    if manifest.get("memory_drops")
-                    else {}
-                ),
             }
         )
     classified = json.loads(args.classified_failures.read_text()) if args.classified_failures else []
@@ -945,7 +819,6 @@ def main() -> None:
         raise ValueError("one table holds one backend")
     backend = backends.pop()
     write_parquet(rows, args.output)
-    Path(args.evidence).write_text(json.dumps({"attempts": manifests, "rows": evidence}, indent=1) + "\n")
     import yaml
 
     meta = {
@@ -966,7 +839,7 @@ def main() -> None:
                 # Per phase: CUPTI GPU-busy union of the module's kernels,
                 # memcpys and memsets per repetition under the serving graphs.
                 "timing_method": {phase: sorted(methods) for phase, methods in TIMING_METHODS.items()},
-                "notes": TABLE_NOTES[backend],
+                "notes": TABLE_NOTES,
                 "input_tokens": input_tokens,
                 # One execution mode per geometry (checkpoint, TP, phase).
                 "execution_mode": dict(sorted(_execution_modes(rows).items())),

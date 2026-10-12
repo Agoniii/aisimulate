@@ -5,7 +5,7 @@
 Loaded in every vLLM worker through vLLM's own general-plugin entry point
 (``vllm/plugins/__init__.py`` ``load_general_plugins``; called by
 ``v1/worker/worker_base.py`` before the model is built). It is inert unless
-``GLM53_W4_MANIFEST`` is set by ``glm53flash_attention_runner``.
+``GLM53_ATTN_MANIFEST`` is set by ``glm53flash_attention_runner``.
 
 Boundary: ``Glm5NextMLAAttention.forward`` (models/glm5next/common/
 attention.py:598-602) of one layer, i.e. the MLA wrapper including the
@@ -58,12 +58,12 @@ def register() -> None:
     ``ModelCudaGraphManager.capture`` (FULL and breakable PIECEWISE graphs),
     so the probe is installed immediately before it.
     """
-    if not os.environ.get("GLM53_W4_MANIFEST"):
+    if not os.environ.get("GLM53_ATTN_MANIFEST"):
         return
     from vllm.v1.worker.gpu import model_runner as runner_module
 
     runner_class = runner_module.GPUModelRunner
-    if getattr(runner_class, "_glm53_w4_patched", False):
+    if getattr(runner_class, "_glm53_attn_patched", False):
         return
     original_capture = runner_class.capture_model
 
@@ -74,7 +74,7 @@ def register() -> None:
         return original_capture(self, *args, **kwargs)
 
     runner_class.capture_model = capture_model
-    runner_class._glm53_w4_patched = True
+    runner_class._glm53_attn_patched = True
 
 
 def _layer(model_runner, layer_id: int):
@@ -87,7 +87,7 @@ def _layer(model_runner, layer_id: int):
 def install_probe(model_runner) -> None:
     import torch
 
-    manifest = json.loads(Path(os.environ["GLM53_W4_MANIFEST"]).read_text())
+    manifest = json.loads(Path(os.environ["GLM53_ATTN_MANIFEST"]).read_text())
     layer = _layer(model_runner, manifest["layer_id"])
     attention = layer.self_attn
     validate_attention(attention, manifest, model_runner)
@@ -154,7 +154,7 @@ def kernel_source(attention) -> str:
     impl = attention.mla_attn.mla_attn.impl if hasattr(attention.mla_attn, "mla_attn") else None
     return "|".join(
         [
-            f"vllm{os.environ.get('GLM53_W4_FRAMEWORK_VERSION', '')}",
+            f"vllm{os.environ.get('GLM53_ATTN_FRAMEWORK_VERSION', '')}",
             type(attention).__name__,
             type(attention.indexer.indexer_op).__name__,
             f"projections={type(attention.o_proj.quant_method).__name__}",
@@ -228,15 +228,9 @@ class Probe:
                     output = self.original(record.hidden_states, record.positions)
         finally:
             o_proj.reduce_results = reduce
-        latencies, timing = time_replays(torch, graph.replay, options["warmup"], options["iterations"])
+        latencies = time_replays(torch, graph.replay, options["warmup"], options["iterations"])
         finite = bool(torch.isfinite(output[:batch]).all().item())
-        STATE.writer.samples(
-            target,
-            latencies,
-            options["warmup"],
-            self.source,
-            {"finite": finite, "padded_tokens": padded, "prefill_chunk_starts": target["chunk_starts"], **timing},
-        )
+        STATE.writer.samples(target, latencies, options["warmup"], self.source, {"finite": finite})
         del graph
         if not finite:
             raise RuntimeError(f"nonfinite decode attention output for {target['target_id']}")
@@ -276,27 +270,11 @@ def _measure_prefill(probe, target: dict, replays_before: int) -> dict:
             with torch.cuda.stream(torch.cuda.Stream()), capture:
                 output = probe.original(record.hidden_states, record.positions)
             torch.cuda.synchronize()
-            latencies, timing = time_replays(torch, capture.replay, options["warmup"], options["iterations"])
+            latencies = time_replays(torch, capture.replay, options["warmup"], options["iterations"])
     finally:
         o_proj.reduce_results = reduce
     finite = bool(torch.isfinite(output[:tokens]).all().item())
-    STATE.writer.samples(
-        target,
-        latencies,
-        options["warmup"],
-        probe.source,
-        {
-            "finite": finite,
-            "padded_tokens": witness.tokens,
-            "reserved_gib": round(torch.cuda.memory_reserved() / 2**30, 2),
-            "segments": capture.num_graphs,
-            "eager_breaks": capture.num_eager_breaks,
-            # vLLM 0.31.0 corrupts unaligned chunk starts: every chunk of this
-            # request set started on a multiple of 4 (checked by the driver).
-            "prefill_chunk_starts": target["chunk_starts"],
-            **timing,
-        },
-    )
+    STATE.writer.samples(target, latencies, options["warmup"], probe.source, {"finite": finite})
     probe.keepalive = capture
     del capture, output
     if not finite:
@@ -314,12 +292,7 @@ def rpc_setup(worker, output: str, key_base: dict, provenance: dict, options: di
     rank = get_tensor_model_parallel_rank()
     STATE.writer = RawWriter(Path(output), rank, key_base, provenance)
     STATE.options = options
-    return {
-        "rank": rank,
-        "captured": sorted(STATE.probe.captured),
-        "pw_captured": sorted(STATE.probe.pw_captured),
-        "source": STATE.probe.source,
-    }
+    return {"rank": rank}
 
 
 def rpc_status(worker) -> dict:

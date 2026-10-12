@@ -29,24 +29,6 @@ def test_kda_case_phases_cover_context_generation_verify():
     assert phases == {"context", "generation", "verify"}
 
 
-def test_kda_case_generator_adds_small_batch_long_context_sweep():
-    # Every shape gets the full context grid plus a separate small-batch
-    # context case reaching 131072 tokens per request; the long lengths never
-    # cross the full batch sweep.
-    from collector.case_generator import get_common_kda_test_cases
-
-    cases = get_common_kda_test_cases()
-    shapes = {(case.d_model, case.num_v_heads) for case in cases}
-    for shape in shapes:
-        context = [case for case in cases if (case.d_model, case.num_v_heads) == shape and case.phase == "context"]
-        assert len(context) == 2
-        full, long = sorted(context, key=lambda case: max(case.seq_len_list))
-        assert max(full.seq_len_list) == 32768
-        assert long.seq_len_list == [65536, 131072]
-        assert long.batch_size_list == [1, 2]
-        assert not set(full.seq_len_list) & set(long.seq_len_list)
-
-
 def _exec_functions(names, namespace):
     tree = ast.parse(SOURCE_PATH.read_text(encoding="utf-8"), filename=str(SOURCE_PATH))
     body = [

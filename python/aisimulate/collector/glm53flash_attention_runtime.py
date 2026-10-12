@@ -7,8 +7,7 @@ serving graph mechanism (prefill: breakable/piecewise prefill graph with eager
 breaks; decode: a full CUDA graph built from the framework's decode-graph
 capture) and time it with ``KernelTimer``: GPU kernel time only, the union of
 the GPU-busy intervals of the CUPTI kernel/memcpy/memset activities that
-belong to each repetition. ``EventTimer`` keeps the previous host-inclusive
-CUDA-event interval as a diagnostic.
+belong to each repetition.
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ import hashlib
 import itertools
 import json
 import os
-import statistics
 from pathlib import Path
 
 from collector.glm53flash_attention_contract import (
@@ -26,7 +24,6 @@ from collector.glm53flash_attention_contract import (
     TIMING_METHODS,
     attention_body,
     geometry_key,
-    indexer_regime,
     sha256_json,
 )
 
@@ -48,35 +45,6 @@ def request_tokens(tokens: list[int], request: int, length: int) -> list[int]:
     """Distinct window of the generated ids per request (deterministic offset)."""
     start = (request * 4099) % (len(tokens) - length + 1)
     return tokens[start : start + length]
-
-
-class EventTimer:
-    """Enqueue every repetition back to back, then read all intervals."""
-
-    def __init__(self, torch):
-        self.torch = torch
-        self.pairs = []
-        self.host_ms = []
-
-    def __call__(self, fn):
-        import time
-
-        start = self.torch.cuda.Event(enable_timing=True)
-        end = self.torch.cuda.Event(enable_timing=True)
-        begin = time.perf_counter()
-        start.record()
-        result = fn()
-        end.record()
-        # Host enqueue time of the same call: diagnoses launch-bound timings.
-        self.host_ms.append((time.perf_counter() - begin) * 1e3)
-        self.pairs.append((start, end))
-        return result
-
-    def read(self) -> list[float]:
-        self.torch.cuda.synchronize()
-        values = [float(start.elapsed_time(end)) for start, end in self.pairs]
-        self.pairs.clear()
-        return values
 
 
 # Chrome-trace categories of the torch profiler (kineto) export.
@@ -108,7 +76,7 @@ def _containing(ranges: list[tuple[float, float, int]], start: float, end: float
     return None
 
 
-def attribute_repetitions(trace_events: list[dict], repetitions: int, device: int | None) -> dict:
+def attribute_repetitions(trace_events: list[dict], repetitions: int, device: int | None) -> list[float]:
     """Assign the GPU activities of a profiler trace to timed repetitions.
 
     Pure function over chrome-trace events (``ts``/``dur`` in microseconds).
@@ -122,8 +90,7 @@ def attribute_repetitions(trace_events: list[dict], repetitions: int, device: in
     but whose execution lies inside a range is foreign work and fails, as does
     a correlation/time contradiction or a repetition without GPU work.
 
-    Returns ``{"repetitions": [per-repetition stats], "diagnostics": {...}}``;
-    ``busy_us`` is the union of the repetition's GPU-busy intervals.
+    Returns the GPU-busy union (microseconds) of each repetition.
     """
     ranges: dict[int, tuple[float, float]] = {}
     for event in trace_events:
@@ -148,11 +115,8 @@ def attribute_repetitions(trace_events: list[dict], repetitions: int, device: in
             continue
         start = float(event["ts"])
         launch_repetition[int(correlation)] = _containing(ordered, start, start)
-    per = [
-        {"intervals": [], "kernel_us": 0.0, "kernels": 0, "memcpy": 0, "memset": 0, "time_only": 0, "by_name": {}}
-        for _ in range(repetitions)
-    ]
-    diagnostics = {"devices": set(), "outside": 0, "time_only": 0}
+    intervals: list[list[tuple[float, float]]] = [[] for _ in range(repetitions)]
+    kernels = [0] * repetitions
     for event in trace_events:
         category = event.get("cat")
         if category not in GPU_ACTIVITY_CATEGORIES:
@@ -160,7 +124,6 @@ def attribute_repetitions(trace_events: list[dict], repetitions: int, device: in
         args = event.get("args") or {}
         if device is not None and args.get("device") is not None and int(args["device"]) != device:
             continue
-        diagnostics["devices"].add(args.get("device"))
         start = float(event["ts"])
         end = start + float(event.get("dur", 0.0))
         by_time = _containing(ordered, start, end)
@@ -170,7 +133,6 @@ def attribute_repetitions(trace_events: list[dict], repetitions: int, device: in
         if known and by_launch is None:
             if by_time is not None:
                 raise TimingAttributionError(f"{event.get('name')} launched outside every repetition ran inside one")
-            diagnostics["outside"] += 1
             continue
         if known:
             if by_time is not None and by_time != by_launch:
@@ -180,39 +142,14 @@ def attribute_repetitions(trace_events: list[dict], repetitions: int, device: in
             repetition = by_launch
         elif by_time is not None:
             repetition = by_time
-            per[repetition]["time_only"] += 1
-            diagnostics["time_only"] += 1
         else:
-            diagnostics["outside"] += 1
             continue
-        stats = per[repetition]
-        stats["intervals"].append((start, end))
-        name = str(event.get("name", category))[:96]
-        stats["by_name"][name] = stats["by_name"].get(name, 0.0) + end - start
-        if category == "kernel":
-            stats["kernels"] += 1
-            stats["kernel_us"] += end - start
-        elif category == "gpu_memcpy":
-            stats["memcpy"] += 1
-        else:
-            stats["memset"] += 1
-    results = []
-    for index, stats in enumerate(per):
-        if not stats["kernels"]:
+        intervals[repetition].append((start, end))
+        kernels[repetition] += category == "kernel"
+    for index, count in enumerate(kernels):
+        if not count:
             raise TimingAttributionError(f"repetition {index} has no attributed GPU kernel")
-        intervals = stats.pop("intervals")
-        low, high = ranges[index]
-        results.append(
-            {
-                **stats,
-                "busy_us": _union_us(intervals),
-                "activity_sum_us": sum(end - start for start, end in intervals),
-                "gpu_span_us": max(end for _, end in intervals) - min(start for start, _ in intervals),
-                "host_range_us": high - low,
-            }
-        )
-    diagnostics["devices"] = sorted(d for d in diagnostics["devices"] if d is not None)
-    return {"repetitions": results, "diagnostics": diagnostics}
+    return [_union_us(busy) for busy in intervals]
 
 
 class KernelTimer:
@@ -230,22 +167,17 @@ class KernelTimer:
         self.torch = torch
         self.scratch = Path(scratch)
 
-    def measure(self, fn, repetitions: int) -> dict:
+    def measure(self, fn, repetitions: int) -> list[float]:
+        """GPU-busy latency (ms) of each of ``repetitions`` calls of ``fn``."""
         torch = self.torch
         from torch.profiler import ProfilerActivity, profile, record_function
 
-        events = []
         torch.cuda.synchronize()
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as profiler:
             for index in range(repetitions):
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
                 with record_function(f"{REPETITION_RANGE}{index}"):
-                    start.record()
-                    result = fn()
-                    end.record()
+                    fn()
                     torch.cuda.synchronize()
-                events.append((start, end))
         self.scratch.mkdir(parents=True, exist_ok=True)
         path = self.scratch / f"trace-{os.getpid()}.json"
         try:
@@ -253,74 +185,20 @@ class KernelTimer:
             trace = json.loads(path.read_text())
         finally:
             path.unlink(missing_ok=True)
-        attributed = attribute_repetitions(trace["traceEvents"], repetitions, torch.cuda.current_device())
-        for stats, (start, end) in zip(attributed["repetitions"], events, strict=True):
-            # Diagnostic only: the host-inclusive interval under the profiler.
-            stats["event_ms_profiled"] = float(start.elapsed_time(end))
-        attributed["result"] = result
-        return attributed
+        busy_us = attribute_repetitions(trace["traceEvents"], repetitions, torch.cuda.current_device())
+        return [value / 1e3 for value in busy_us]
 
 
-def kernel_samples(attributed: dict, event_ms: list[float], warmup: int) -> tuple[list[float], dict]:
-    """Per-repetition kernel-only latencies (ms) and their timing diagnostics.
-
-    ``event_ms`` are the host-inclusive CUDA-event intervals of the same call
-    replayed back to back without the profiler (the previous timing method),
-    kept for comparison only. Diagnostics cover the published repetitions.
-    """
-    reps = attributed["repetitions"]
-    if len(event_ms) != len(reps):
-        raise ValueError("event and kernel timings cover different repetition counts")
-    latencies = [stats["busy_us"] / 1e3 for stats in reps]
-    timed = reps[warmup:]
-
-    def column(name, scale=None, digits=5):
-        if scale is None:
-            return [int(stats[name]) for stats in timed]
-        return [round(stats[name] * scale, digits) for stats in timed]
-
-    return latencies, {
-        "kernel_busy_ms": column("busy_us", 1e-3),
-        "kernel_sum_ms": column("kernel_us", 1e-3),
-        "activity_sum_ms": column("activity_sum_us", 1e-3),
-        "gpu_span_ms": column("gpu_span_us", 1e-3),
-        "kernel_count": column("kernels"),
-        "memcpy_count": column("memcpy"),
-        "memset_count": column("memset"),
-        "time_only_count": column("time_only"),
-        "event_ms_profiled": column("event_ms_profiled", 1.0),
-        "event_ms_unprofiled": [round(v, 5) for v in event_ms[warmup:]],
-        # Median per-activity-name duration (us) over the timed repetitions.
-        "activity_us_by_name": {
-            name: round(statistics.median(stats["by_name"].get(name, 0.0) for stats in timed), 3)
-            for name in sorted({n for stats in timed for n in stats["by_name"]})
-        },
-        "attribution": attributed["diagnostics"],
-    }
-
-
-def time_replays(torch, replay, warmup: int, iterations: int) -> tuple[list[float], dict]:
-    """Kernel-only latencies of ``replay`` and their diagnostics.
-
-    First the call is replayed back to back under CUDA events without the
-    profiler (the previous host-inclusive method, kept as a diagnostic), then
-    timed again under ``KernelTimer``; published latencies are the latter.
-    """
+def time_replays(torch, replay, warmup: int, iterations: int) -> list[float]:
+    """Kernel-only latencies (ms) of ``warmup + iterations`` replays of ``replay``."""
     import tempfile
 
-    repetitions = warmup + iterations
-    timer = EventTimer(torch)
-    for _ in range(repetitions):
-        timer(replay)
-    event_ms = timer.read()
-    host = [round(v, 4) for v in timer.host_ms[warmup:]]
-    attributed = KernelTimer(torch, Path(tempfile.gettempdir()) / "glm53-attention-traces").measure(replay, repetitions)
-    latencies, timing = kernel_samples(attributed, event_ms, warmup)
-    return latencies, {**timing, "host_enqueue_ms": host}
+    timer = KernelTimer(torch, Path(tempfile.gettempdir()) / "glm53-attention-traces")
+    return timer.measure(replay, warmup + iterations)
 
 
 class RawWriter:
-    """Per-rank raw JSONL stream of repetition samples and diagnostics."""
+    """Per-rank raw JSONL stream of repetition samples."""
 
     def __init__(self, output: Path, rank: int, key_base: dict, provenance: dict):
         self.path = Path(output) / f"rank-{rank}.jsonl"
@@ -346,7 +224,6 @@ class RawWriter:
             "batch_size": target["batch_size"],
             "prefix": target["prefix"],
             "x": target["x"],
-            "indexer_regime": indexer_regime(phase, target["prefix"], target["x"], self.key_base["index_topk"]),
         }
         with self.path.open("a") as stream:
             for repetition, latency in enumerate(latencies):
@@ -370,10 +247,6 @@ class RawWriter:
                     )
                     + "\n"
                 )
-
-    def diagnostic(self, payload: dict) -> None:
-        with self.path.open("a") as stream:
-            stream.write(json.dumps({"record": "diagnostic", "tp_rank": self.rank, **payload}) + "\n")
 
 
 def target_id(phase: str, batch: int, prefix: int, x: int) -> str:
