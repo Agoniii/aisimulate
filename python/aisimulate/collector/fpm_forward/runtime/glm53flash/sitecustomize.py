@@ -59,12 +59,11 @@ if os.environ.get("DYN_FPM_GLM53FLASH_REAL_KV") == "1":
                     return
                 _verify_sources()
                 self.original.exec_module(module)
-                if os.environ.get("DYN_FPM_GLM53FLASH_PREFIX_SEED") == "1":
-                    # Default serving configuration (prefix caching on): every
-                    # request is scheduled natively; see glm53flash_prefix_scheduler.
-                    module_name, class_name = "glm53flash_prefix_scheduler", "Glm53FlashPrefixSeedScheduler"
-                else:
-                    module_name, class_name = "glm53flash_scheduler", "Glm53FlashRealKVScheduler"
+                if os.environ.get("DYN_FPM_GLM53FLASH_PREFIX_SEED") != "1":
+                    raise RuntimeError("GLM-5.3-Flash FPM requires DYN_FPM_GLM53FLASH_PREFIX_SEED=1")
+                # Default serving configuration (prefix caching on): every
+                # request is scheduled natively; see glm53flash_prefix_scheduler.
+                module_name, class_name = "glm53flash_prefix_scheduler", "Glm53FlashPrefixSeedScheduler"
                 adapter = sys.modules.get(module_name)
                 if adapter is not None and not hasattr(adapter, class_name):
                     # A spawned worker may unpickle the adapter class first.

@@ -59,7 +59,7 @@ pub const FPM_FORWARD_SCHEMA_VERSION: u64 = 7;
 pub const FPM_FORWARD_COORDINATE_SYSTEM: &str = "iteration_totals_balanced_v1";
 pub const FPM_FORWARD_PARTITION_POLICY: &str = "balanced_v1";
 /// Legacy single-sample policy. Schema 7 also admits the per-row self-benchmark
-/// contract and the backend-bound real-hybrid median contracts below; median
+/// contract and the backend-bound native-FPM median contracts below; median
 /// latency is already reduced.
 pub const FPM_FORWARD_MEASUREMENT_POLICY: &str = "dynamo_native_single_sample_v1";
 const FPM_ROW_MEASUREMENT_POLICY: &str = "per_row_single_sample_or_median_of_3";
@@ -68,8 +68,6 @@ const FPM_ROW_MEASUREMENT_POLICY: &str = "per_row_single_sample_or_median_of_3";
 enum MeasurementPolicy {
     SingleSample,
     PerRow,
-    VllmRealHybridMedian,
-    SglangRealHybridMedian,
     /// Default serving configuration (prefix caching on): Dynamo
     /// InstrumentedScheduler FPM wall time, real prefix-cache seeding.
     VllmNativeFpmMedian,
@@ -83,8 +81,6 @@ impl MeasurementPolicy {
         match self {
             Self::SingleSample => FPM_FORWARD_MEASUREMENT_POLICY,
             Self::PerRow => FPM_ROW_MEASUREMENT_POLICY,
-            Self::VllmRealHybridMedian => "vllm_native_real_hybrid_median_v1",
-            Self::SglangRealHybridMedian => "sglang_native_real_hybrid_median_v1",
             Self::VllmNativeFpmMedian => "vllm_native_fpm_prefix_seed_median_v1",
             Self::SglangNativeFpmMedian => "sglang_native_fpm_radix_seed_median_v1",
         }
@@ -93,9 +89,6 @@ impl MeasurementPolicy {
     fn state_protocol(self) -> Option<&'static str> {
         match self {
             Self::SingleSample | Self::PerRow => None,
-            Self::VllmRealHybridMedian | Self::SglangRealHybridMedian => {
-                Some("glm53flash_same_request_real_hybrid_v1")
-            }
             Self::VllmNativeFpmMedian => Some("glm53flash_prefix_cache_real_seed_v1"),
             Self::SglangNativeFpmMedian => Some("glm53flash_sglang_radix_real_seed_v1"),
         }
@@ -104,8 +97,6 @@ impl MeasurementPolicy {
     fn timing_boundary(self) -> Option<&'static str> {
         match self {
             Self::SingleSample | Self::PerRow => None,
-            Self::VllmRealHybridMedian => Some("vllm_native_scheduler_output_interval"),
-            Self::SglangRealHybridMedian => Some("sglang_native_forward_device_timer"),
             Self::VllmNativeFpmMedian => Some("dynamo_vllm_instrumented_scheduler_fpm_wall_time"),
             Self::SglangNativeFpmMedian => Some("sglang_native_fpm_rank0_device_timer_wall_time"),
         }
@@ -542,12 +533,6 @@ fn validate_sidecar(
     ) {
         (Some(FPM_FORWARD_MEASUREMENT_POLICY), _, _) => MeasurementPolicy::SingleSample,
         (Some(FPM_ROW_MEASUREMENT_POLICY), _, _) => MeasurementPolicy::PerRow,
-        (Some("vllm_native_real_hybrid_median_v1"), Some(7), "vllm") => {
-            MeasurementPolicy::VllmRealHybridMedian
-        }
-        (Some("sglang_native_real_hybrid_median_v1"), Some(7), "sglang") => {
-            MeasurementPolicy::SglangRealHybridMedian
-        }
         (Some("vllm_native_fpm_prefix_seed_median_v1"), Some(7), "vllm") => {
             MeasurementPolicy::VllmNativeFpmMedian
         }
@@ -1930,15 +1915,17 @@ pub(crate) mod tests {
     }
 
     fn median_rows(backend: &'static str) -> Vec<RowSpec> {
-        let (policy, boundary) = if backend == "vllm" {
+        let (policy, protocol, boundary) = if backend == "vllm" {
             (
-                "vllm_native_real_hybrid_median_v1",
-                "vllm_native_scheduler_output_interval",
+                "vllm_native_fpm_prefix_seed_median_v1",
+                "glm53flash_prefix_cache_real_seed_v1",
+                "dynamo_vllm_instrumented_scheduler_fpm_wall_time",
             )
         } else {
             (
-                "sglang_native_real_hybrid_median_v1",
-                "sglang_native_forward_device_timer",
+                "sglang_native_fpm_radix_seed_median_v1",
+                "glm53flash_sglang_radix_real_seed_v1",
+                "sglang_native_fpm_rank0_device_timer_wall_time",
             )
         };
         default_rows()
@@ -1956,7 +1943,7 @@ pub(crate) mod tests {
                     global: 0,
                     warmup: 5,
                     measured: 10,
-                    protocol: "glm53flash_same_request_real_hybrid_v1",
+                    protocol,
                     boundary,
                 });
                 row
@@ -2011,37 +1998,11 @@ pub(crate) mod tests {
         }
     }
 
-    fn native_fpm_rows(backend: &'static str) -> Vec<RowSpec> {
-        let (policy, protocol, boundary) = if backend == "vllm" {
-            (
-                "vllm_native_fpm_prefix_seed_median_v1",
-                "glm53flash_prefix_cache_real_seed_v1",
-                "dynamo_vllm_instrumented_scheduler_fpm_wall_time",
-            )
-        } else {
-            (
-                "sglang_native_fpm_radix_seed_median_v1",
-                "glm53flash_sglang_radix_real_seed_v1",
-                "sglang_native_fpm_rank0_device_timer_wall_time",
-            )
-        };
-        median_rows(backend)
-            .into_iter()
-            .map(|mut row| {
-                let m = row.median.as_mut().unwrap();
-                m.policy = policy;
-                m.protocol = protocol;
-                m.boundary = boundary;
-                row
-            })
-            .collect()
-    }
-
     #[test]
     fn native_fpm_policies_load_and_bind_their_own_protocol_and_boundary() {
         for backend in ["vllm", "sglang"] {
             let tmp = tempfile::tempdir().unwrap();
-            write_median_pair(tmp.path(), &native_fpm_rows(backend));
+            write_median_pair(tmp.path(), &median_rows(backend));
             let table = FpmForwardTable::new_with_replacement(
                 tmp.path().to_path_buf(),
                 "b200_sxm",
@@ -2059,13 +2020,13 @@ pub(crate) mod tests {
                 (2, "measurement_policy"),
             ] {
                 let tmp = tempfile::tempdir().unwrap();
-                let mut rows = native_fpm_rows(backend);
+                let mut rows = median_rows(backend);
                 let m = rows[1].median.as_mut().unwrap();
                 match mutation {
-                    // A same-request label cannot pass as prefix-cache seeding.
-                    0 => m.protocol = "glm53flash_same_request_real_hybrid_v1",
-                    1 => m.boundary = "vllm_native_scheduler_output_interval",
-                    _ => m.policy = "vllm_native_real_hybrid_median_v1",
+                    // Another contract's labels cannot pass as this one.
+                    0 => m.protocol = "other_state_protocol_v1",
+                    1 => m.boundary = "other_timing_boundary",
+                    _ => m.policy = "other_native_median_v1",
                 }
                 write_median_pair(tmp.path(), &rows);
                 let table = FpmForwardTable::new_with_replacement(
@@ -2080,7 +2041,7 @@ pub(crate) mod tests {
             // The native-FPM sidecar is backend-bound.
             let other = if backend == "vllm" { "sglang" } else { "vllm" };
             let tmp = tempfile::tempdir().unwrap();
-            let mut rows = native_fpm_rows(backend);
+            let mut rows = median_rows(backend);
             for row in &mut rows {
                 row.backend = other;
             }
@@ -2113,7 +2074,7 @@ pub(crate) mod tests {
                 0 => m.policy = FPM_FORWARD_MEASUREMENT_POLICY,
                 1 => m.measured = 1,
                 2 => m.protocol = "wrong",
-                3 => m.boundary = "sglang_native_forward_device_timer",
+                3 => m.boundary = "sglang_native_fpm_rank0_device_timer_wall_time",
                 _ => row.kv_seed_regime = Some(FPM_KV_SEED_FAKE_FALLBACK),
             }
             write_median_pair(tmp.path(), &rows);
@@ -2136,7 +2097,7 @@ pub(crate) mod tests {
             ("schema_version", serde_json::json!(6)),
             (
                 "measurement_policy",
-                serde_json::json!("sglang_native_real_hybrid_median_v1"),
+                serde_json::json!("sglang_native_fpm_radix_seed_median_v1"),
             ),
             ("measurement_policy", serde_json::json!("per_row")),
             ("warmup_repeats", serde_json::json!(5.0)),

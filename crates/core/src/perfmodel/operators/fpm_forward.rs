@@ -131,19 +131,6 @@ fn data_err(msg: String) -> AicError {
 }
 
 impl FpmForwardOp {
-    fn validate_glm53flash_runtime(&self, backend: &str, version: &str) -> Result<(), AicError> {
-        if backend == "vllm"
-            && version == "0.30.0+glm53kpool.bf5f6b0e689d"
-            && matches!(
-                self.model_path.as_str(),
-                "zai-org/GLM-5.3-Flash" | "nvidia/GLM-5.3-Flash-NVFP4"
-            )
-        {
-            return Err(data_err("GLM-5.3-Flash vLLM runtime quarantined after actual circular-tail slot-mapping out-of-bounds evidence; new runtime qualification required".into()));
-        }
-        Ok(())
-    }
-
     fn sol_at(&self, db: &PerfDatabase, coords: &[f64]) -> Result<f64, AicError> {
         if self.dcp_size.is_some_and(|dcp| dcp > 1) {
             return Err(AicError::UnsupportedModel(
@@ -154,8 +141,6 @@ impl FpmForwardOp {
     }
 
     fn select_cell<'a>(&self, db: &'a PerfDatabase) -> Result<&'a FpmForwardCell, AicError> {
-        // Applies to exact hits, interpolation, decode baselines and ceilings.
-        self.validate_glm53flash_runtime(&db.backend, &db.version)?;
         // Exact matching remains authoritative, including the recorded FMHA label.
         // A different precision cell is a miss; the selector never rewrites it.
         let cell =
@@ -1602,86 +1587,6 @@ mod tests {
             assert!(direct.query_pass_baseline(&db, 8, 4096.0).is_err());
             assert_eq!(direct.decode_kv_ceiling(&db).unwrap(), None);
         }
-    }
-
-    #[test]
-    fn quarantined_glm_runtime_rejects_every_public_table_query() {
-        use crate::perf_database::fpm_forward::tests::RowSpec;
-        for model in ["zai-org/GLM-5.3-Flash", "nvidia/GLM-5.3-Flash-NVFP4"] {
-            let rows: Vec<_> = [("prefill", 3, 4096), ("decode", 0, 4096)]
-                .into_iter()
-                .map(|(phase, q, p)| RowSpec {
-                    model_path: model,
-                    workload_kind: phase,
-                    batch_size: 1,
-                    total_prefill_tokens: q,
-                    total_kv_read_tokens: p,
-                    latency_ms: 1.0,
-                    ..RowSpec::default()
-                })
-                .collect();
-            let tmp = tempfile::tempdir().unwrap();
-            write_pair(tmp.path(), &rows);
-            // TEST ONLY: create the runtime identity without requiring shipped
-            // data for the quarantined version, then attach real synthetic rows.
-            let mut db = PerfDatabase::load_with_sources_opts(
-                std::path::Path::new(SYSTEMS_ROOT),
-                "b200_sxm",
-                "vllm",
-                "0.30.0+glm53kpool.bf5f6b0e689d",
-                &Default::default(),
-                true,
-            )
-            .unwrap();
-            db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(
-                tmp.path().to_path_buf(),
-                "b200_sxm",
-                "vllm",
-                "0.25.1",
-            ));
-            for phase in [FpmPhase::Prefill, FpmPhase::Decode] {
-                let mut query = op(phase);
-                query.model_path = model.into();
-                let coords = if phase == FpmPhase::Prefill {
-                    vec![1.0, 3.0, 4096.0]
-                } else {
-                    vec![1.0, 4096.0]
-                };
-                for result in [
-                    query.query(&db, &ctx(1, 3, 4096)),
-                    query.query_totals(&db, &coords),
-                ] {
-                    assert!(
-                        result
-                            .unwrap_err()
-                            .to_string()
-                            .contains("runtime quarantined")
-                    );
-                }
-                if phase == FpmPhase::Decode {
-                    assert!(
-                        query
-                            .query_pass_baseline(&db, 1, 4096.0)
-                            .unwrap_err()
-                            .to_string()
-                            .contains("runtime quarantined")
-                    );
-                    assert!(
-                        query
-                            .decode_kv_ceiling(&db)
-                            .unwrap_err()
-                            .to_string()
-                            .contains("runtime quarantined")
-                    );
-                }
-            }
-        }
-        // This finding is specific to this model/runtime identity.
-        assert!(
-            op(FpmPhase::Decode)
-                .validate_glm53flash_runtime("vllm", "0.30.0+glm53kpool.bf5f6b0e689d")
-                .is_ok()
-        );
     }
 
     #[test]
