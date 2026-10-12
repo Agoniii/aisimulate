@@ -481,6 +481,14 @@ def _frontend_implies_host_loop(value: Any) -> Any:
     return value
 
 
+def _omit_inactive_host_loop(self, handler: Any) -> dict[str, Any]:
+    # Keep the plain worker shape unless the host loop is on.
+    payload = handler(self)
+    if payload.get("host_loop") is False:
+        payload.pop("host_loop")
+    return payload
+
+
 def _validate_frontend_source(
     config: HostWorkerPredictionConfig
     | HostWorkerRecommendationConfig
@@ -505,6 +513,7 @@ class HostWorkerPredictionConfig(WorkerPredictionConfig):
     vision: VisionPredictionConfig | None = None
 
     _implies_host_loop = model_validator(mode="before")(_frontend_implies_host_loop)
+    _omit_host_loop = model_serializer(mode="wrap")(_omit_inactive_host_loop)
 
     @model_validator(mode="after")
     def _validate_host_features(self) -> HostWorkerPredictionConfig:
@@ -939,6 +948,7 @@ class HostWorkerRecommendationConfig(WorkerRecommendationConfig):
     vision: VisionPredictionConfig | None = None
 
     _implies_host_loop = model_validator(mode="before")(_frontend_implies_host_loop)
+    _omit_host_loop = model_serializer(mode="wrap")(_omit_inactive_host_loop)
 
     @model_validator(mode="after")
     def _validate_host_features(self) -> HostWorkerRecommendationConfig:
