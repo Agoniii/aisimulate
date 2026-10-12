@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from ...config.common import load_yaml
-from ...config.engine import FrontendMeasurementConfig
+from ...config.engine import FrontendMeasurementConfig, FrontendStageConfig
 from ..table import SGLANG_VERSION, load_table, update_table
 from .lower import STAGE_LABELS, environment, frontend_row
 
@@ -38,16 +38,32 @@ def _images(value: str) -> tuple[int, int, int]:
     return height, width, count
 
 
+# Provenance `--show` prints per row, so a re-collection that replaced a row is visible.
+PROVENANCE_SHOWN = ("host", "threads", "image_processor_backend", "processor_workers", "sampled_at")
+LIBRARY_VERSIONS_SHOWN = ("transformers", "torch")
+
+
+def _stages(stages: list[FrontendStageConfig]) -> str:
+    """Stages labeled by `STAGE_LABELS`, or by position when a row holds another number of them."""
+    labels = STAGE_LABELS if len(stages) == len(STAGE_LABELS) else [f"stage{i}" for i in range(1, len(stages) + 1)]
+    return ", ".join(
+        f"{label}({stage.workers}) {stage.service_ms:.2f} ms" for label, stage in zip(labels, stages, strict=True)
+    )
+
+
 def _show(path: Path) -> int:
-    table = load_table(path)
+    try:
+        table = load_table(path)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     env = table.environment
     print(f"{path}: {env.cpu}, sglang {env.sglang_version}, python {env.python}")
     for row in table.rows:
-        stages = ", ".join(
-            f"{label}({stage.workers}) {stage.service_ms:.2f} ms"
-            for label, stage in zip(STAGE_LABELS, row.stages, strict=True)
-        )
-        print(f"  {row.measured_for.describe():70s} | {stages} | {table.digest(row)}")
+        print(f"  {row.measured_for.describe():70s} | {_stages(row.stages)} | {table.digest(row)}")
+        for keys in (PROVENANCE_SHOWN, LIBRARY_VERSIONS_SHOWN):
+            shown = ", ".join(f"{key} {row.provenance[key]}" for key in keys if key in row.provenance)
+            if shown:
+                print(f"    {shown}")
     return 0
 
 
@@ -102,7 +118,11 @@ def main(argv=None) -> int:
     parser.add_argument("--table", help="host cost table to create or extend (default: host_profile.path of --config)")
     parser.add_argument("--show", action="store_true", help="print the table's rows and exit")
     parser.add_argument("--model", help="model identifier as written in engine.model")
-    parser.add_argument("--frontend", choices=("python", "rust"))
+    parser.add_argument(
+        "--frontend",
+        choices=("python", "rust"),
+        help="python: SGLang's HTTP server with its TokenizerManager; rust: the embedded Rust server (single-rank)",
+    )
     parser.add_argument("--images", type=_images, metavar="HxW[xN]")
     parser.add_argument("--encoding", choices=("png", "jpeg"))
     parser.add_argument("--min-pixels", type=int, help="processor rescale floor; default: the checkpoint's")
@@ -146,17 +166,14 @@ def main(argv=None) -> int:
         recording["measured_for"] = measurement.model_dump(mode="json")
     try:
         row = frontend_row(recording, measurement)
+        table = update_table(path, environment(recording), row)
     except ValueError as exc:
+        # A lowering failure or a table from another serving environment keeps the measurement.
         failed = path.with_name(f"{path.name}.failed-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.json")
         failed.parent.mkdir(parents=True, exist_ok=True)
         failed.write_text(json.dumps(recording, indent=1))
         raise SystemExit(f"{exc}\nThe raw recording was kept at {failed}; lower it again with --recording") from exc
-    table = update_table(path, environment(recording), row)
-    stages = "; ".join(
-        f"{label}({stage.workers}) {stage.service_ms:.2f} ms"
-        for label, stage in zip(STAGE_LABELS, row.stages, strict=True)
-    )
-    print(f"{path}: {measurement.describe()} -> {stages} [{table.digest(row)}]")
+    print(f"{path}: {measurement.describe()} -> {_stages(row.stages)} [{table.digest(row)}]")
     return 0
 
 

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import platform
 import socket
@@ -158,12 +159,27 @@ def _environment(version):
     return {"cpu": _cpu_model(), "sglang_version": version, "python": sys.version.split()[0]}
 
 
+def _library_versions():
+    """The processor libraries behind both frontends; recorded as provenance, not as table identity."""
+    import torch
+    import transformers
+
+    return {"transformers": str(transformers.__version__), "torch": str(torch.__version__)}
+
+
 async def measure_python(args, images, mm_process_config):
     from sglang.srt.managers.multimodal_processor import get_mm_processor, import_processors
     from sglang.srt.multimodal.transport import determine_tensor_transport_mode
 
     server_args, model_config, processor = _serving_components(args.model, mm_process_config)
-    import_processors("sglang.srt.multimodal.processors")
+    # Optional processors (audio, video) log their missing codecs at warning level while importing.
+    sglang_logger = logging.getLogger("sglang")
+    level = sglang_logger.level
+    sglang_logger.setLevel(logging.ERROR)
+    try:
+        import_processors("sglang.srt.multimodal.processors")
+    finally:
+        sglang_logger.setLevel(level)
     mm = get_mm_processor(
         model_config.hf_config, server_args, processor, determine_tensor_transport_mode(), model_config=model_config
     )
@@ -338,9 +354,16 @@ def main(argv=None) -> int:
     mm_process_config = {"image": image} if image else None
     images = generate_images(args.height, args.width, args.count, args.encoding)
     measure = measure_python if args.frontend == "python" else measure_rust
+    pixels = "".join(f" {name}={value}" for name, value in image.items())
+    _progress(
+        f"measuring {args.model} {args.frontend} {args.height}x{args.width}x{args.count} {args.encoding}{pixels} "
+        f"on {collected['host']}"
+    )
     result = asyncio.run(measure(args, images, mm_process_config))
     result["environment"] = environment
-    result["provenance"].update(collected, sampled_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    result["provenance"].update(
+        collected, **_library_versions(), sampled_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    )
     json.dump(result, sys.stdout)
     sys.stdout.write("\n")
     return 0

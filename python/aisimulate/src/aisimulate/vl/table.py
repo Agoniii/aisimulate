@@ -17,7 +17,6 @@ import hashlib
 import json
 import os
 import shlex
-import sys
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -110,10 +109,21 @@ def update_table(path: str | Path, environment: TableEnvironment, row: FrontendR
         fcntl.flock(lock, fcntl.LOCK_EX)
         table = load_table(path) if path.exists() else HostCostTable(environment=environment)
         recorded = table.environment
-        if recorded != environment:
+        same_release = sglang_release(recorded.sglang_version) == sglang_release(environment.sglang_version)
+        differing = [
+            name
+            for name, same in (
+                ("cpu", recorded.cpu == environment.cpu),
+                ("sglang release", same_release),
+                ("python", recorded.python == environment.python),
+            )
+            if not same
+        ]
+        if differing:
             raise ValueError(
-                f"host cost table {path} was measured on {recorded.model_dump()}; "
-                f"this recording is from {environment.model_dump()}. Keep one table per serving environment."
+                f"host cost table {path} was measured on {recorded.model_dump()}; this recording is from "
+                f"{environment.model_dump()} ({', '.join(differing)} mismatch). Keep one table per serving "
+                "environment: pass another --table for this host and point host_profile.path at it."
             )
         kept = [existing for existing in table.rows if existing.measured_for != row.measured_for]
         table = table.model_copy(update={"rows": [*kept, row]})
@@ -122,9 +132,13 @@ def update_table(path: str | Path, environment: TableEnvironment, row: FrontendR
 
 
 def collect_command(path: str | Path, measurement: FrontendMeasurementConfig) -> str:
-    """The exact command that adds the missing row, ready to paste."""
+    """The exact command that adds the missing row, ready to paste on the serving host.
+
+    `python` stands for an interpreter with aisimulate installed there; the
+    measuring interpreter is the `--sglang-python` placeholder.
+    """
     parts = [
-        shlex.quote(sys.executable),
+        "python",
         "-m",
         "aisimulate.vl.collect",
         "--table",
@@ -157,7 +171,8 @@ def lookup(table: HostCostTable, path: str | Path, measurement: FrontendMeasurem
             return row
     raise MissingRow(
         f"host cost table {path} has no row for {measurement.describe()}. "
-        "Measure it on the serving host, then rerun:\n  " + collect_command(path, measurement)
+        "Measure it on the serving host, from an interpreter with aisimulate installed, then rerun:\n  "
+        + collect_command(path, measurement)
     )
 
 
@@ -170,7 +185,7 @@ def resolve_frontend(
         # The first prediction on a new serving host: the table is created by its first collection.
         raise MissingRow(
             f"host cost table {config.path} does not exist yet. Measure the workload on the serving host, "
-            "then rerun:\n  " + collect_command(config.path, measurement)
+            "from an interpreter with aisimulate installed, then rerun:\n  " + collect_command(config.path, measurement)
         )
     table = load_table(config.path)
     row = lookup(table, config.path, measurement)
