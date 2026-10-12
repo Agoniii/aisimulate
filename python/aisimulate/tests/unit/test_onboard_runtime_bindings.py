@@ -859,6 +859,67 @@ def test_unreadable_runtime_index_preserves_all_cell_reports(default_collection,
     assert "runtime observation index is not readable" in " ".join(report["blockers"])
 
 
+@pytest.mark.parametrize("formal_phases", [(), ("prefill",), ("prefill", "decode")])
+@pytest.mark.parametrize("index_state", ["missing", "missing_file", "directory", "unreadable"])
+def test_only_selected_smoke_index_errors_block_readiness(default_collection, monkeypatch, formal_phases, index_state):
+    from aisimulate.support import collection_readiness
+
+    request, root, checkpoint_path = default_collection
+    monkeypatch.setattr(
+        collection_readiness,
+        "_cell_report",
+        lambda plan, cell, campaign, entry: {"status": "ready", "blockers": [], "cell": cell.to_dict()},
+    )
+    baseline = collection_readiness.assess_readiness(request, root, checkpoint_path.parent)
+    assert baseline["ready_for_full_collection"], baseline["blockers"]
+    formal = json.loads(checkpoint_path.read_text())
+    campaign = root / "fpm-artifacts" / formal["plan_sha256"][:16]
+    smoke = campaign / "smoke"
+    shutil.copytree(campaign, smoke, ignore=shutil.ignore_patterns("smoke"))
+    smoke_checkpoint = copy.deepcopy(formal)
+    index = smoke / Path(formal["runtime_observations"]).relative_to(campaign)
+    smoke_checkpoint["runtime_observations"] = str(index)
+    if index_state == "missing":
+        smoke_checkpoint.pop("runtime_observations")
+    elif index_state == "missing_file":
+        index.unlink()
+    elif index_state == "directory":
+        smoke_checkpoint["runtime_observations"] = str(index.parent)
+    else:
+        read_bytes = Path.read_bytes
+
+        def denied_smoke_index(path):
+            if path.resolve() == index.resolve():
+                raise PermissionError("smoke runtime observation index is not readable")
+            return read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", denied_smoke_index)
+    _write(checkpoint_path.with_name("fpm_forward_smoke.json"), smoke_checkpoint)
+    cells_by_phase = {item["cell"]["workload_kind"]: item["cell"]["cell_id"] for item in baseline["selected_cells"]}
+    formal["cells"] = {cells_by_phase[phase]: formal["cells"][cells_by_phase[phase]] for phase in formal_phases}
+    _write(checkpoint_path, formal)
+
+    report = collection_readiness.assess_readiness(request, root, checkpoint_path.parent)
+
+    assert report["campaigns"][0]["kind"] == "smoke"
+    assert report["campaigns"][0]["errors"]
+    assert all("runtime memory:" in error for error in report["campaigns"][0]["errors"])
+    assert report["campaigns"][1]["errors"] == []
+    assert all(len(item["cells"]) == 2 for item in report["campaigns"])
+    assert {item["cell"]["workload_kind"]: item["campaign"] for item in report["selected_cells"]} == {
+        phase: "formal" if phase in formal_phases else "smoke" for phase in ("prefill", "decode")
+    }
+    if len(formal_phases) == 2:
+        assert report["ready_for_full_collection"], report["blockers"]
+        assert report["blockers"] == []
+        assert report["runtime_compatibility"]["status"] == "complete"
+        assert set(report["runtime_compatibility"]["phases"]) == {"prefill", "decode"}
+    else:
+        assert not report["ready_for_full_collection"]
+        assert report["runtime_compatibility"] is None
+        assert any("smoke: runtime memory:" in reason for reason in report["blockers"])
+
+
 @pytest.mark.parametrize("formal_has_cells", [False, True])
 def test_formal_runtime_evidence_supersedes_only_attempted_smoke_cells(default_collection, formal_has_cells):
     from aisimulate.support.collection_readiness import assess_readiness

@@ -246,6 +246,7 @@ def assess_readiness(
     campaigns = []
     selected = {}
     selected_runtime = {}
+    selected_runtime_errors = {}
     blockers = []
     requires_runtime = runtime_probe_manifest(request) is not None
     for smoke in (True, False):
@@ -297,6 +298,7 @@ def assess_readiness(
                 },
             )
             runtime_binding = None
+            runtime_error = None
             if requires_runtime and any(
                 cell.cell_id not in selected or cell.cell_id in checkpoint["cells"] for cell in plan.cells
             ):
@@ -311,7 +313,7 @@ def assess_readiness(
                     }
                 except (OSError, TypeError, ValueError, KeyError) as error:
                     report["errors"].append(f"runtime memory: {error}")
-                    blockers.append(f"{report['kind']}: runtime memory: {error}")
+                    runtime_error = f"{report['kind']}: runtime memory: {error}"
             for cell in plan.cells:
                 entry = checkpoint["cells"].get(cell.cell_id)
                 cell_report = _cell_report(plan, cell, campaign, entry)
@@ -321,6 +323,9 @@ def assess_readiness(
                     # A later formal attempt supersedes its smoke memory evidence
                     # even when its observation index is missing or unreadable.
                     selected_runtime.pop(cell.cell_id, None)
+                    selected_runtime_errors.pop(cell.cell_id, None)
+                    if runtime_error is not None:
+                        selected_runtime_errors[cell.cell_id] = runtime_error
                     if runtime_binding is not None:
                         selected_runtime[cell.cell_id] = {
                             **runtime_binding,
@@ -342,6 +347,7 @@ def assess_readiness(
         )
     runtime = None
     if requires_runtime:
+        blockers.extend(dict.fromkeys(selected_runtime_errors.values()))
         try:
             runtime = verify_collection_runtime_bindings(request, list(selected_runtime.values()))
         except (OSError, TypeError, ValueError, KeyError) as error:
