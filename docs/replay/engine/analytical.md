@@ -126,10 +126,10 @@ A disaggregated variant is in
 | `engine.workers.encoder.backend_version` | Resolved | fixed | Encoder performance data. The backend follows `engine.backend`. |
 | `engine.workers.encoder.tensor` | `1` | Scalar or `choices` | Positive. |
 | `engine.workers.encoder.replicas` | `1` | Scalar or `choices` | Positive. |
-| `engine.workers.encoder.batch_size` | `1` | Scalar or `choices` | 1 to 8. |
+| `engine.workers.encoder.batch_size` | `1` for `analytical`, `8` for `native` | Scalar or `choices` | 1 to 8. |
 | `engine.workers.encoder.latency_correction` | `1.0` | fixed | Positive multiplier on encoder latency. Analytical pools only; `mode: native` rejects any other value. |
 | `engine.workers.encoder.rate_degradation` | `0.9` | fixed | In `(0, 1]`. Fraction of ideal encoder throughput that is usable. Unused by `mode: native`. |
-| `engine.workers.encoder.mode` | `analytical` | fixed | `analytical` adds the encoder batch latency to mean TTFT. `native` replays SGLang `--encoder-only` servers event by event and gates each request's admission to the language worker; `batch_size` is then the loop's cap (`SGLANG_ENCODER_MAX_BATCH_SIZE`, default 8) and must be a scalar. SGLang only. See [Native encoder pools](#native-encoder-pools). |
+| `engine.workers.encoder.mode` | `analytical` | fixed | `analytical` adds the encoder batch latency to mean TTFT. `native` replays SGLang `--encoder-only` servers event by event and gates each request's admission to the language worker; `batch_size` is then the loop's cap (`SGLANG_ENCODER_MAX_BATCH_SIZE`, default 8) and must be a scalar; encoder servers are modeled at `--dp-size 1`, and extra `replicas` approximate DP ranks only for single-image requests. SGLang only. See [Native encoder pools](#native-encoder-pools). |
 | `engine.workers.encoder.host_profile` | Unset | fixed | `mode: native` only: `{path, frontend: python}`. The table's `process` stage prices the encoder's CPU preprocessing. Exclusive with `frontend`; one of the two is required. |
 | `engine.workers.encoder.frontend` | Unset | fixed | `mode: native` only: the resolved `process` stage with its `measured_for`, as a saved recommendation carries it in place of `host_profile`. Exclusive with `host_profile`. A `predict` of such a YAML reads no host table and refuses a workload other than `measured_for`. |
 | `engine.workers.encoder.transfer.bandwidth_gb_per_second` | Unset | fixed | `mode: native` only, required. Encoder-to-language link; embeddings fan out to every tensor-parallel rank. |
@@ -148,7 +148,9 @@ static workers, and default op-level language timing. Rejected: traces,
 sessions, variable lengths, prefix sharing, rate or KV-relative load,
 whole-forward (FPM) timing, adapters, and `--capture-per-request`. Encoder CPU
 time and embedding transfer are not modeled, and no deployment artifacts are
-generated. The encoder model follows
+generated. Encoder pools of either mode build Qwen3-VL and Kimi K3 vision
+towers; Llama 4 and other families are rejected, while encoding on the worker
+keeps its Llama 4 tile geometry. The encoder model follows
 [AIC revision f8f2341](https://github.com/ai-dynamo/aiconfigurator/commit/f8f2341cb5761877bda694ab954cb6f5eff78fd4).
 
 <a id="native-encoder-pools"></a>

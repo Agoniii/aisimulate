@@ -4,7 +4,11 @@
 //! Behavioral model of the SGLang scheduler loop (`Scheduler.get_next_batch_to_run`,
 //! `update_running_batch`, `ScheduleBatch.retract_decode`) as of sgl-project/sglang v0.5.6.post2
 //! (`5c8bd8b5`, `python/sglang/srt/managers/scheduler.py`, `schedule_batch.py`). Re-implemented in
-//! Rust from the observed semantics; no SGLang source is copied.
+//! Rust from the observed semantics; no SGLang source is copied. The overlap-iteration wiring
+//! hosted here (the `HostLoop` drain, `inflight_source`, the prefix-cache commits deferred until
+//! the forward's result is observed, and the pricing of vision-cache misses) was verified against
+//! v0.5.19 (`0bcd822`); batch selection, retraction and the prefill/decode interval keep the
+//! `5c8bd8b5` pin.
 //!
 //! The optional prefill/decode interval follows the scheduling contract at
 //! https://github.com/sgl-project/sglang/blob/20621aa14bda7726a8a968f326198eac61717fef/python/sglang/srt/managers/scheduler.py

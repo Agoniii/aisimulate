@@ -310,7 +310,9 @@ pub struct TraceTtftStageStats {
     pub mean_scheduler_inbox_wait_ms: f64,
     /// Received to selected into a batch.
     pub mean_receive_to_admit_ms: f64,
-    /// Selected to the prompt's last forward finishing on the device.
+    /// Selected to the prompt's last forward finishing on the device, of the
+    /// request's first prefill attempt; a retraction before the first token is
+    /// observed lands in `mean_result_observation_delay_ms`.
     pub mean_prefill_elapsed_ms: f64,
     /// Device completion to the scheduler observing the result: the KV source
     /// hold on a prefill rank, the first token elsewhere.
@@ -1372,13 +1374,13 @@ impl TraceCollector {
         self.static_worker_count = None;
     }
 
-    /// Set GPUs-per-worker per role (from the mocker engine parallelism). Used
-    /// in `finish()` to derive gpu_hours from the worker-seconds.
     /// GPUs of the encoder pool ahead of the language workers.
     pub(crate) fn set_encoder_gpus(&mut self, gpus: usize) {
         self.encoder_gpus = gpus;
     }
 
+    /// Set GPUs-per-worker per role (from the mocker engine parallelism). Used
+    /// in `finish()` to derive gpu_hours from the worker-seconds.
     pub fn set_gpus_per_worker(&mut self, prefill: usize, decode: usize) {
         self.prefill_gpus_per_worker = prefill;
         self.decode_gpus_per_worker = decode;

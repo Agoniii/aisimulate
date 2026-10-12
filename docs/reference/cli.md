@@ -337,6 +337,7 @@ observations. For a new model, follow the
 | No selected configuration and zero resource-limited candidates, exit `1` | Inspect `recommendation.json` for candidate status, reason, and GPU/SLA constraints. | Check that the model fits within `max_candidate_gpus`, and that the workload can meet the SLA. |
 | Resource refusal, exit `3` | Inspect resource diagnostics and any completed recommendation ledger. | Check the [local resource budget](local-resources.md); preserve completed results before choosing a smaller workload or another host. |
 | A candidate fails to resolve performance data | Check the model, hardware, backend version, and timing mode. FPM needs a matching collected cell. | Use a covered combination from the [support reference](../../README.md#support-and-accuracy) or the [FPM workflow](../perf-model/methods/whole-forward.md). |
+| `host cost table ... does not exist yet` (or a missing-row message) | A native SGLang VL prediction reads the frontend stage from a host cost table row measured on the serving host; the message prints the `collect` command that adds the row. | Run the printed `python -m aisimulate.vl.collect ...` with `--sglang-python` pointing at the serving venv, then rerun `predict`; see [SGLang VL host loop](../replay/engine/sglang-vl-host-loop.md). |
 | `--online` is rejected | The selected stack must advertise online support. | Use offline execution with `--stack engine`, or an integration that supports online execution. |
 
 For automation, check the exit code as well as standard output. `--format json` changes successful

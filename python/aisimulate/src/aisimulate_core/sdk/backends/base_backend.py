@@ -820,11 +820,13 @@ class BaseBackend:
     ) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
         """Compiled-engine path of the encoder per-op loop.
 
-        Encoder ops are deliberately NOT in the compiled ``EngineSpec`` (the
-        compile path threads no image configuration), so they travel through
-        the ad-hoc op-list evaluation FFI: ops are grouped by their resolved
-        ``(batch, eff_s)`` (the shape math above), each group serialized to
-        OpSpec JSON and evaluated at ``x=batch*s``.
+        The static encoder loop (``run_static`` / ``run_encoder_static``) keeps
+        its shape math in Python and prices the ops through the ad-hoc op-list
+        evaluation FFI: ops are grouped by their resolved ``(batch, eff_s)``
+        (the shape math above), each group serialized to OpSpec JSON and
+        evaluated at ``x=batch*s``. The canonical estimator compiles the same
+        encoder ops into ``EngineSpec.vision`` and prices them in
+        ``Engine::evaluate_vision``, which mirrors this loop.
         Latency/energy fold with ``+=``; sources are last-wins ACROSS shape
         groups, while duplicate names WITHIN one group would merge to
         ``"mixed"`` inside the engine (``build_encoder_ops`` never emits

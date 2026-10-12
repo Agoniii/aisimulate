@@ -21,7 +21,7 @@ traffic:
   source:
     type: synthetic
     input_tokens: 128
-    output_tokens: 64
+    output_tokens: 32
     images: {height: 1024, width: 1024, count: 1, encoding: png, identity: unique}
   load: {type: concurrency, concurrency: 4}
   stop: {requests: 32}
@@ -30,6 +30,7 @@ engine:
   model: Qwen/Qwen3-VL-8B-Instruct
   hardware: h200_sxm
   backend: sglang
+  backend_version: 0.5.14
   workers:
     aggregated:
       parallelism: {replicas: 1, tensor: 1}
@@ -44,11 +45,19 @@ python -m aisimulate.vl.collect --config prediction.yaml --sglang-python /path/t
 aisimulate predict --config prediction.yaml
 ```
 
+`collect` runs from an interpreter with aisimulate installed (Python 3.11 to
+3.13) on the serving host and launches the measurement in the serving venv
+named by `--sglang-python`; the two are separate environments whenever the
+serving venv's Python is older than aisimulate supports.
+
 The field tables are on [Workers](workers.md#sglang-host-loop-frontend-and-vision)
 (`host_loop`, `frontend`, `host_profile`, `vision`),
 [EPD](analytical.md#native-encoder-pools) (`engine.workers.encoder`) and
 [workloads](../workloads.md#traffic-fields) (`traffic.source.images`); the
 reported keys are in the [CLI reference](../../reference/cli.md#standard-output).
+On these pages, native is an event-level replay of a real SGLang component
+(the worker's host loop or an encoder pool), analytical is an overlay on the
+mean metrics, and `host_profile` is the YAML key for a host cost table.
 
 The only CPU cost the model carries is the frontend stage a request crosses
 before the scheduler admits it. Each frontend is one measured stage, `process`:
@@ -70,12 +79,21 @@ tensor-parallel width one. Pricing these steps as stages of their own is
 warranted when the frontend-attributable TTFT error at the target concurrency
 is material, or for multi-image and very large image workloads.
 
+Each frontend is one shared pool: requests sharing it progress uniformly and
+leave it together, where SGLang's processor executor releases them in order
+from a small thread pool. TTFT tails and prefill batching are therefore
+pessimistic for synchronized arrivals and unaffected once the GPU bounds the
+loop.
+
 A host cost table belongs to one serving environment (CPU model, sglang
 release, Python) and holds one row per measurement: model, frontend and image
 shape (height, width, count, encoding, processor pixel budget). The host name,
 thread count and sampling time of each collection stay in the row's provenance.
-A prediction whose workload has no row fails closed and prints the `collect`
-command that adds it; a failed lowering keeps the raw recording next to the
+`engine.backend_version` selects the packaged GPU performance data; the table
+is measured with the serving host's sglang 0.5.19, on which the frontend stage
+is defined, and the two pins are independent. A prediction whose workload has
+no row fails closed and prints the `collect` command that adds it; a failed
+lowering keeps the raw recording next to the
 table, and `collect --recording` lowers it again. The stage a prediction or
 candidate runs with carries the measurement it came from
 (`frontend.measured_for`), so a saved recommendation refuses to price another
@@ -117,9 +135,9 @@ that needs no output token completes when its prefill is observed, not when it
 launches; a request retracted or cancelled while its forward is in flight
 neither receives that forward's token nor keeps it, while the device work stays
 charged; requests arriving during an iteration are received at the next one;
-with a free scheduler thread the loop reproduces the legacy token times
-exactly. Forward-pass telemetry records the forward's own device time, not the
-iteration it was launched in.
+with a free scheduler thread the loop reproduces the token times of the pass
+model (`host_loop: false`) exactly. Forward-pass telemetry records the
+forward's own device time, not the iteration it was launched in.
 
 The vision encoder runs once per prefill batch over the cache-miss images whose
 placeholders overlap the chunk being computed, deduplicated by image identity,
@@ -130,8 +148,9 @@ priced by the same canonical estimator as the language model
 (`ForwardPassPerfModelConfig.encoder_parallel`): `vision.encoder_parallel: tp`
 (SGLang's default) shards it over the tensor-parallel group so every rank
 encodes every image, `dp` (`--mm-enable-dp-encoder`) replicates it and splits
-the images; sglang implements `dp` for its Qwen-VL, GLM, InternVL, Kimi and
-MiMo towers, and a Llama 4 configuration asking for it is rejected. Timing,
+the images; sglang implements `dp` for the towers that read
+`mm_enable_dp_encoder` at the pinned revision (Qwen-VL, GLM, InternVL, Kimi,
+MiMo, MiniMax), and a Llama 4 configuration asking for it is rejected. Timing,
 collectives, and the per-rank weights deducted from the KV budget all follow
 that one setting, as does the embedding cache. Image geometry follows the
 architecture's processor rules: each image becomes one or more encoder
@@ -158,7 +177,9 @@ token; zero on an aggregated rank). The six spans sum to per-request TTFT for
 requests that reached every milestone; with a native encoder pool they start
 at the pool's delivery and `encoder_latency_ms` covers the wait. These are
 server-internal latencies to scheduler observation, not client-visible ones,
-and they are reported with or without per-request capture.
+and they are reported with or without per-request capture. Stage means
+describe a request's first prefill attempt; a retraction before the first
+token lands in the result-observation span.
 
 ## Disaggregated prefill
 
@@ -171,9 +192,11 @@ prefill server: the request crosses the prefill rank's frontend stages, its
 scheduler receives it at an iteration boundary, the extend runs with the vision
 encoder, and the KV handoff to the decode rank starts when the next iteration
 observes that forward, where SGLang sends the last KV chunk and the request
-metadata while processing the batch result. A finished extend leaves the batch
-at once (`disagg_prefill_inflight_queue` keeps it out of the next batch), so the
-prefill rank never prices a ghost decode step. The decode rank keeps the
+metadata while processing the batch result. The PD prefill loop forms
+prefill-only batches and never merges the previous extend into a running batch;
+the finished request moves to `disagg_prefill_inflight_queue` when its result
+is processed and waits there for the KV send, so the prefill rank never prices
+a ghost decode step. The decode rank keeps the
 existing PD contract: it activates the request when the transfer completes and
 its first decode step produces the first visible token.
 
@@ -195,17 +218,25 @@ encoder servers (`--encoder-only`) runs one serial loop, as `EncoderScheduler`
 does: it takes the queued requests up to `batch_size` (the loop's cap,
 `SGLANG_ENCODER_MAX_BATCH_SIZE`, default 8), runs the image processor and one
 encoder forward over the batch, then pushes each part's embeddings to the
-language rank. The language side splits a request's images evenly over the
-encoder servers before sending (`_assign_items_by_modality`; its random server
+language rank. Encoder servers are modeled at `--dp-size 1`; extra `replicas`
+approximate DP ranks only for single-image requests, since SGLang routes a
+server's whole part to one least-pending rank. The language side splits a
+request's images evenly over the encoder servers before sending
+(`_assign_items_by_modality`; its random server
 order becomes a rotation over the arrival sequence), so a multi-image request
 encodes in parallel and is admitted once its last part arrived. The push is
 asynchronous, so the instance takes its next batch when the forward ends;
 requests arriving at one instant share a batch because they are already queued
-when the loop collects it. A request reaches the language worker only when its
+when the loop collects it. That same-instant coalescing is a replay
+idealization: SGLang coalesces only the parts enqueued within one event-loop
+turn, so a synchronized wave may start as a smaller batch followed by the rest.
+A request reaches the language worker only when its
 embeddings arrived, and its time to first token counts the wait; the report
 adds `encoder_latency_ms` (mean arrival-to-delivery), `encoder_gpus`,
 `total_gpus`, and, per request, `encoder_ready_ms`. The pool's GPUs count in
-`gpu_hours`, so `throughput_per_gpu` ranks encoder replicas and language
+`gpu_hours`, which integrates every provisioned GPU over the simulated clock
+(under the host loop that clock runs one overlap iteration past the last
+observed token), so `throughput_per_gpu` ranks encoder replicas and language
 workers on the same footing. Requests still parked in the pool when the
 ReplaySpec's `max_sim_time_ms` cuts a run short are reported as arrived and
 incomplete.
@@ -219,7 +250,7 @@ language worker's own tower would see:
 | --- | --- |
 | CPU preprocessing | Extrapolated from the `process` stage of the encoder host's cost table (`host_profile`, Python frontend), divided by the images that stage was measured with: the encoder servers run the same HF image processor as the tokenizer manager, so a batch of `n` images costs `n` times the per-image term. The report labels it `preprocess_source: frontend_process_extrapolated`; the encoder's own batch preprocessing and its four parallel image loaders are not measured. |
 | Encoder forward | The canonical timing model at the pool's `tensor` width prices one forward over the batch's images (`predict_vision_ms`), the same oracle a language rank uses for its vision tower; the pool's power evidence enters the report like a language rank's. |
-| Transfer | `embedding bytes per image x language tensor-parallel width` at `transfer.bandwidth_gb_per_second`: `zmq_to_scheduler` fans the embeddings out to every rank. Parts are timed independently at that bandwidth from the end of their batch, the same precision boundary as the prefill-to-decode KV handoff, with which it shares the bytes-over-bandwidth arithmetic. The device-to-host copy SGLang makes before the push is not modeled. |
+| Transfer | `embedding bytes per image x language tensor-parallel width` at `transfer.bandwidth_gb_per_second`: `zmq_to_scheduler` fans the embeddings out to every rank. Each part is timed at the full configured bandwidth from the end of its batch, with no contention between parts, encoder servers or the P/D KV link: the same precision boundary as the prefill-to-decode KV handoff, with which it shares the bytes-over-bandwidth arithmetic. The device-to-host copy SGLang makes before the push is not modeled. |
 
 The language worker runs `--language-only`: it neither hosts the vision tower
 nor prices image frontend stages (`vision`, `frontend`, and `host_profile` are
@@ -230,16 +261,22 @@ recommendation carries the resolved `process` stage with its `measured_for` as
 for it and a table edited after the search does not change its result; the
 row's content digest is recorded in the recommendation ledger and, through the
 encoder block of the prediction metadata, in `prediction.json` whenever a
-table was resolved. Not modeled:
-`--enable-adaptive-dispatch-to-encoder` (single-image requests encoded locally,
-off by default), the mooncake GPU-direct transfer and the encoder's prefix
-embedding cache, and the resident tower weights that Qwen-VL still loads on a
-language-only rank.
+table was resolved. Encoder pools, analytical and native, build Qwen3-VL and
+Kimi K3 vision towers; Llama 4 and other families are rejected with a message
+saying so, while encoding on the worker keeps its Llama 4 tile geometry. Not
+modeled: `--enable-adaptive-dispatch-to-encoder` (single-image requests encoded
+locally, off by default), the mooncake GPU-direct transfer and the encoder's
+prefix embedding cache, the resident tower weights that Qwen-VL still loads on
+a language-only rank, encoder data parallelism above `--dp-size 1`, SGLang's
+encoder request and receive timeouts (a saturated pool reports every request
+completed with its full wait where SGLang aborts the request), and the
+tokenizer manager's per-part HTTP POST of the image payload to each encoder.
 
 ## Compatibility and scope
 
 `host_loop`, `frontend`, and `vision` require `backend: sglang`, `pipeline: 1`,
-and `attention_data: 1` on the worker that hosts them: `workers.aggregated` in
+`attention_data: 1` and no context parallelism (`prefill_context` and
+`decode_context` at `1`) on the worker that hosts them: `workers.aggregated` in
 `mode: aggregated` or `workers.prefill` in `mode: disaggregated`. Images
 encoded on that worker also require default (AIC) timing; `host_loop` and
 `frontend` work with any timing model. Image workloads take either this path
@@ -249,8 +286,14 @@ pools, not by the analytical overlay. On this path
 `scheduler.max_batched_tokens` becomes SGLang's `chunked_prefill_size`; other
 SGLang predictions keep their existing behavior. `recommend` accepts the same
 fields as fixed data; candidates search load, scheduling, tensor parallelism
-and replicas, and their saved prediction YAML reproduces the scored metrics
-through `aisimulate predict`.
+and replicas (not `mode`, which must be concrete), and their saved prediction
+YAML reproduces the scored metrics through `aisimulate predict`.
+
+Host tables describe SGLang's CPU image-processor path
+(`--image-processor-backend pil`). SGLang 0.5.19's default `auto` on a GPU host
+runs the fast torchvision processor on the serving GPU with one processor
+worker, which is not priced and whose contention with the scheduler is outside
+the model; a deployment matches its table only when launched with that flag.
 
 Not modeled: the GPU image processor path, video, speculative decoding, mixed image resolutions in one
 workload, and the output side (detokenizer and tokenizer-manager work after the
@@ -278,7 +321,8 @@ packaged `h200_sxm` SGLang data with hand-written stages; the collector's Python
 and Rust paths were run on a serving host with SGLang 0.5.19 for Qwen3-VL-8B.
 Llama 4 tile geometry and TP `2`/`4` encoder layouts are covered by contract
 tests on the geometry and the compiled tower, not by end-to-end serving
-comparisons.
+comparisons. Encoder pools of either mode build Qwen3-VL and Kimi K3 towers
+only; the Llama 4 geometry applies to encoding on the worker.
 
 ## Behavior source and validation
 
@@ -308,10 +352,10 @@ pinned upstream frontend objects unmodified on the serving host and times them
 from the outside. Deterministic Rust tests cover the iteration structure,
 mid-iteration arrivals, ghost decode members and their KV slot, deferred
 prefix-cache commits, retraction and cancellation of forwards in flight, the
-equivalence with the legacy pass model, cache-miss selection per chunk, pool
-ownership and arrivals settling past completions, the forward-duration
-telemetry, the vision tower's DP share, and end-to-end stage timestamps
-through the ReplaySpec JSON boundary. Python tests exercise the public
+equivalence with the pass model (`host_loop: false`), cache-miss selection per
+chunk, pool ownership and arrivals settling past completions, the
+forward-duration telemetry, the vision tower's DP share, and end-to-end stage
+timestamps through the ReplaySpec JSON boundary. Python tests exercise the public
 configuration gates, the lowering to engine arguments, host cost table lookup
 and the miss message, recording lowering, the measured-workload check on saved
 candidates, the native predict path on the packaged `h200_sxm` SGLang data

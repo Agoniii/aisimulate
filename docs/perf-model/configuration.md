@@ -255,8 +255,8 @@ These additional public YAML fields are concrete controls:
 | `engine.nextn`, `nextn_accepted` | Compute-side MTP identity and separate expected acceptance assumption; both are required for explicit MTP. |
 | `engine.enable_chunked_prefill` | Override chunked prefill; omission preserves the backend default. |
 
-These controls require default timing on language roles. AFD and analytical
-encoder configurations reject the unsupported controls. Use `--stack engine`
+These controls require default timing on language roles. AFD and encoder-pool
+configurations of either mode reject the unsupported controls. Use `--stack engine`
 and the supported model/backend; an older external adapter can reject them at
 capability validation before Replay. Expected acceptance is workload behavior,
 not an estimator-fitting observation. See [Replay features](../replay/features.md)

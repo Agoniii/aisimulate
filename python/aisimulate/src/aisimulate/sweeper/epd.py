@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sweeper integration with the in-tree AIC EPD estimator and composition.
+"""Sweeper integration of the encoder pool: analytical overlay and native terms.
 
-The implementation of AIC PR #1340 is already shipped in this repository.
-Import its candidate/overlay helpers instead of maintaining a second model.
-This analytical overlay is not an event-level encoder queue simulation.
+This module hosts both the analytical overlay, imported from the in-tree AIC EPD
+estimator (the implementation of AIC PR #1340 already shipped in this repository;
+its candidate/overlay helpers are reused instead of maintaining a second model),
+and the native encoder pool's resolved terms for the Rust replay. The analytical
+overlay is not an event-level encoder queue simulation.
 """
 
 from __future__ import annotations

@@ -12,8 +12,12 @@
 //! request once every part's embeddings arrived. Each server runs one serial loop
 //! that takes the queued parts up to `SGLANG_ENCODER_MAX_BATCH_SIZE`, runs the
 //! image processor and one encoder forward over that batch, then pushes each
-//! part's embeddings asynchronously and takes its next batch. Re-implemented in
-//! Rust from the observed semantics; no SGLang source is copied.
+//! part's embeddings asynchronously and takes its next batch. Parts queued at
+//! the same virtual instant form one batch, a replay idealization: SGLang
+//! coalesces only the parts enqueued within one event-loop turn, so a
+//! synchronized wave may start as a smaller batch followed by the rest.
+//! Re-implemented in Rust from the observed semantics; no SGLang source is
+//! copied.
 //!
 //! The pool is generic over what it parks: replay hands it the admitted arrival
 //! and gets it back once the last part reached the language rank, so admission

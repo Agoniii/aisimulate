@@ -17,8 +17,6 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// Inference backend.
-///
 /// How a VL model's vision tower is laid out over the tensor-parallel group.
 ///
 /// Mirrors `ModelConfig.enable_encoder_dp` in the Python model layer: `Tp`
