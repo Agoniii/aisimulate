@@ -78,10 +78,20 @@ forward interval.
   requests that hit the cached prefix. The radix cache is flushed per point.
 - The client does no work while a round is in flight.
 - The measured decode step is attributed by geometry, not by message order.
+- Request tokens come from the same seeded generator as the vLLM producer.
+  The client checks the model's `tokenizer.json` against the pinned hash
+  first. The run metadata (`input_provenance`) records the generator spec and
+  the token-stream hash.
 
-Usage: `python3 sglang_native_fpm.py --model <dir> --model-revision <rev>
---tp {2,4} --quant {fp8,nvfp4} --mem-fraction <f> --phase {prefill,decode}
---points <manifest.json> --corpus <text> --out <dir>`.
+Usage, with `python/aisimulate` on `PYTHONPATH`:
+`python3 -m collector.fpm_forward.sglang_native_fpm --model <dir>
+--model-revision <rev> --tp {2,4} --quant {fp8,nvfp4} --mem-fraction <f>
+--phase {prefill,decode} --points <manifest.json> --out <dir>`.
+
+The published SGLang 0.5.20 tables were collected with an earlier client
+revision that took its request tokens from a text corpus. That input
+provenance is recorded in the HF dataset metadata. Future collections use the
+seeded generator.
 
 ## Consumer
 

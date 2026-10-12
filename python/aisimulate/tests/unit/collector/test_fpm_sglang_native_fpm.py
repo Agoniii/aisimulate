@@ -66,3 +66,64 @@ def test_request_plans_match_the_clean_truth_construction():
     plan = drv.plan_rounds(decode, pool)
     assert [len(p) for p in plan["rounds"][0]] == [197, 196]
     assert plan["expected_cached"] == [192, 192] and plan["max_tokens"] == 6
+
+
+class _Tokenizer:
+    def __init__(self):
+        self.vocab_size = 154820
+        self.added_tokens_decoder = {154820: "<|special|>"}
+        self.all_special_ids = [154821]
+
+
+def _pinned_model_dir(tmp_path, monkeypatch, content=b'{"test-only": "tokenizer"}'):
+    import hashlib
+
+    from collector import glm53flash_attention_tokens as seeded
+
+    (tmp_path / "tokenizer.json").write_bytes(content)
+    # TEST ONLY: bind the pinned digest to this synthetic tokenizer.json.
+    monkeypatch.setattr(seeded, "TOKENIZER_JSON_SHA256", hashlib.sha256(content).hexdigest())
+    return tmp_path
+
+
+def test_seeded_pool_matches_the_shared_generator_and_records_its_spec(tmp_path, monkeypatch):
+    import hashlib
+    import json
+
+    from collector import glm53flash_attention_tokens as seeded
+
+    model_dir = _pinned_model_dir(tmp_path, monkeypatch)
+    pool, spec = drv.seeded_pool(_Tokenizer(), model_dir, "rev")
+    count = drv.MAX_CONTEXT + drv.MAX_BATCH * seeded.REQUEST_STRIDE
+    assert pool == seeded.generate(53, count, 0, 154820)
+    assert all(0 <= token < 154820 for token in pool)
+    assert spec == {
+        "source": "seeded_tokens",
+        "generator": "sha256_counter_rejection",
+        "generator_version": 1,
+        "seed": 53,
+        "count": count,
+        "vocab_low": 0,
+        "vocab_high_exclusive": 154820,
+        "tokenizer_json_sha256": seeded.TOKENIZER_JSON_SHA256,
+        "tokenizer_revision": "rev",
+        "token_ids_sha256": hashlib.sha256(json.dumps(pool, separators=(",", ":")).encode()).hexdigest(),
+        "unique_token_count": len(set(pool)),
+        "sampling": spec["sampling"],
+    }
+    # The longest single-request prompt never wraps the stream onto itself.
+    decode = {"phase": "decode", "benchmark_id": 0, "contexts": [drv.MAX_CONTEXT]}
+    prompt = drv.plan_rounds(decode, pool)["rounds"][0][0]
+    assert prompt == pool[: drv.MAX_CONTEXT - drv.DECODE_LEAD]
+
+
+def test_seeded_pool_rejects_an_unpinned_tokenizer(tmp_path, monkeypatch):
+    model_dir = _pinned_model_dir(tmp_path, monkeypatch)
+    (model_dir / "tokenizer.json").write_bytes(b"{}")
+    with pytest.raises(ValueError, match="not the pinned"):
+        drv.seeded_pool(_Tokenizer(), model_dir, "rev")
+    model_dir = _pinned_model_dir(tmp_path, monkeypatch)
+    tokenizer = _Tokenizer()
+    tokenizer.all_special_ids = [7]
+    with pytest.raises(RuntimeError, match="special ids inside"):
+        drv.seeded_pool(tokenizer, model_dir, "rev")

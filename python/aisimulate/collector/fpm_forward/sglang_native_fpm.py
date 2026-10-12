@@ -52,6 +52,9 @@ TIMING_BOUNDARY = "sglang_native_fpm_rank0_device_timer_wall_time"
 MESSAGE_WAIT_SECONDS = 10.0
 QUIET_SECONDS = 0.5
 MERGED_INTERVAL_RATIO = 1.5
+MAX_BATCH = 32
+MAX_CONTEXT = 131072
+INPUT_SOURCE = "seeded_tokens"
 
 
 def log(message: str) -> None:
@@ -61,6 +64,39 @@ def log(message: str) -> None:
 def rotation(pool: list[int], offset: int, length: int) -> list[int]:
     size = len(pool)
     return [pool[(offset + index) % size] for index in range(length)]
+
+
+def seeded_pool(tokenizer, model_dir: Path, revision: str) -> tuple[list[int], dict]:
+    """Seeded request-token stream shared with the vLLM producer (no text corpus).
+
+    Ids come from ``collector.glm53flash_attention_tokens`` (seed 53) over the
+    pinned tokenizer's ordinary BPE vocabulary, after checking ``tokenizer.json``.
+    Prompts are ``[offset, length]`` rotations of this stream (see the round specs).
+    """
+    from collector import glm53flash_attention_tokens as seeded
+
+    tokenizer_sha = hashlib.sha256((Path(model_dir) / "tokenizer.json").read_bytes()).hexdigest()
+    if tokenizer_sha != seeded.TOKENIZER_JSON_SHA256:
+        raise ValueError(f"tokenizer.json {tokenizer_sha} is not the pinned GLM-5.3-Flash tokenizer")
+    low, high = seeded.ordinary_vocab_range(tokenizer)
+    if (low, high) != (seeded.VOCAB_LOW, seeded.VOCAB_HIGH):
+        raise ValueError(f"tokenizer ordinary vocabulary {(low, high)} differs from the pinned range")
+    count = MAX_CONTEXT + MAX_BATCH * seeded.REQUEST_STRIDE
+    pool = seeded.generate(seeded.SEED, count, low, high)
+    return pool, {
+        "source": INPUT_SOURCE,
+        "generator": seeded.GENERATOR,
+        "generator_version": seeded.GENERATOR_VERSION,
+        "seed": seeded.SEED,
+        "count": count,
+        "vocab_low": low,
+        "vocab_high_exclusive": high,
+        "tokenizer_json_sha256": tokenizer_sha,
+        "tokenizer_revision": revision,
+        "token_ids_sha256": hashlib.sha256(json.dumps(pool, separators=(",", ":")).encode()).hexdigest(),
+        "unique_token_count": len(set(pool)),
+        "sampling": "prompt = concatenated [offset, length] rotations of the seeded stream (see round specs)",
+    }
 
 
 def http(url: str, payload=None, timeout: float = 3600.0):
@@ -497,7 +533,6 @@ def main(argv=None) -> int:
     parser.add_argument("--phase", choices=("prefill", "decode"), required=True)
     parser.add_argument("--points", type=Path, required=True)
     parser.add_argument("--select", default="", help="comma-separated benchmark ids (smoke)")
-    parser.add_argument("--corpus", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--port", type=int, default=30000)
     parser.add_argument("--ipc", default="")
@@ -517,8 +552,7 @@ def main(argv=None) -> int:
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    text = args.corpus.read_bytes()
-    pool = list(tokenizer.encode(text.decode("utf-8"), add_special_tokens=False))
+    pool, input_provenance = seeded_pool(tokenizer, Path(args.model), args.model_revision)
     command = server_command(args)
     (args.out / "server-command.json").write_text(json.dumps(command, indent=1))
     log(" ".join(command))
@@ -583,13 +617,7 @@ def main(argv=None) -> int:
                 },
                 "serving_config": {"command": command, "startup_check": checks, "hit_unit": HIT_UNIT},
                 "input_provenance": {
-                    "source": "tokenizer_text",
-                    "text_sha256": hashlib.sha256(text).hexdigest(),
-                    "token_ids_sha256": hashlib.sha256(json.dumps(pool, separators=(",", ":")).encode()).hexdigest(),
-                    "token_ids": pool,
-                    "tokenizer_revision": args.model_revision,
-                    "token_count": len(pool),
-                    "unique_token_count": len(set(pool)),
+                    **input_provenance,
                     "points_manifest_sha256": hashlib.sha256(args.points.read_bytes()).hexdigest(),
                 },
             },
