@@ -257,7 +257,7 @@ def test_sol_is_unchanged_by_measured_composition(backend, prefill_ms, decode_ms
 
 
 def test_kda_kernels_match_collected_kda_rows():
-    # Ops W2 collection contract: merged-qkv conv on both backends; SGLang
+    # collect_kda.py contract: merged-qkv conv on both backends; SGLang
     # decode avoids the packed kernel because GLM sets a gate lower bound.
     from aisimulate_core.sdk.models.glm53flash import KDA_KERNELS
 
@@ -270,16 +270,20 @@ def test_kda_kernels_match_collected_kda_rows():
 
 
 @pytest.mark.parametrize(("backend", "version"), [("vllm", "0.31.0"), ("sglang", "0.5.20")])
-def test_tp1_fits_one_gb300_only_with_the_nvfp4_checkpoint(backend, version):
+def test_tp1_fits_one_gb300_only_with_the_nvfp4_checkpoint(backend, version, tmp_path):
     # TP1 is an NVFP4-only deployment: the FP8 checkpoint's resident weights
     # exceed one GB300, so the native memory model leaves no KV budget and the
-    # deployment is rejected; NVFP4 TP1 keeps a positive KV budget.
+    # deployment is rejected; NVFP4 TP1 keeps a positive KV budget. Memory
+    # needs only the system file, so a systems root without GLM tables works.
+    import shutil
     from pathlib import Path
 
     import aisimulate_core
     from aisimulate_core.sdk.memory import estimate_kv_cache
 
-    root = Path(aisimulate_core.__file__).parent / "systems" / "profiles" / "glm53flash"
+    root = tmp_path / "systems"
+    root.mkdir()
+    shutil.copy(Path(aisimulate_core.__file__).parent / "systems" / "gb300.yaml", root / "gb300.yaml")
 
     def estimate(path, quant):
         return estimate_kv_cache(

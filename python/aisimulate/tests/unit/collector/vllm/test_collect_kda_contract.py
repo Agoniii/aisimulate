@@ -271,7 +271,6 @@ def test_glm5_next_decode_mirrors_serving_decode():
     ("version", "accepted"),
     [
         ("0.1.dev19262+gb6bbf29dd", True),
-        ("0.30.0+glm53tail.eb4704514fdf", True),
         ("0.31.0", True),
         ("0.31.1", False),
     ],
@@ -330,11 +329,9 @@ def test_kda_audited_release_sets_do_not_overlap():
     [
         ("moonshotai/Kimi-K3", "0.1.dev19262+gb6bbf29dd", True),
         ("moonshotai/Kimi-K3", "0.27.0", False),
-        ("moonshotai/Kimi-K3", "0.30.0+glm53tail.eb4704514fdf", False),
         ("moonshotai/Kimi-K3", "0.31.0", False),
         ("zai-org/GLM-5.3-Flash", "0.31.0", True),
         ("nvidia/GLM-5.3-Flash-NVFP4", "0.31.0", True),
-        ("zai-org/GLM-5.3-Flash", "0.30.0+glm53tail.eb4704514fdf", False),
         ("zai-org/GLM-5.3-Flash", "0.30.0", False),
         ("zai-org/GLM-5.3-Flash", "0.29.0", False),
         ("nvidia/GLM-5.3-Flash-NVFP4", "0.1.dev19262", False),

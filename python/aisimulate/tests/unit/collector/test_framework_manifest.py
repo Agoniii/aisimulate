@@ -799,7 +799,6 @@ frameworks:
         ("0.28.0", False),
         ("0.29.0", False),
         ("0.30.0", True),
-        ("0.30.0+glm53tail.eb4704514fdf", True),
         ("0.31.0", True),
         ("0.31.1", False),
     ],

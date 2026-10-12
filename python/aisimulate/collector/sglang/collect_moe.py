@@ -56,7 +56,7 @@ rank-local workload construction, quantized weight setup, and perf logging.
 # upstream and only ever supplies exactly 0.5.14 or 0.5.17 in a sanctioned
 # run, so the leak is unreachable there.
 # 0.5.20 audit (2026-09-30; source tag v0.5.20 == 94602c9c2b7c vs v0.5.17,
-# runtime smoke on GB300 in the GLM-5.3-Flash W1 campaign). 0.5.18/0.5.19
+# source-only). 0.5.18/0.5.19
 # were never verified and are carved out with != (same caveat as above).
 # Unchanged vs 0.5.17: ServerArgs/set_global_server_args_for_scheduler
 # (server_args.py:195,635; publish() now runs resolve_once(), which returns

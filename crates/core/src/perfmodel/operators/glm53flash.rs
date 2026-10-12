@@ -530,7 +530,7 @@ pub struct Glm53MhcOp {
 }
 impl Glm53MhcOp {
     /// Call sites covered by one `mhc_module_perf` row for this role. GLM
-    /// rows (Ops W3, vLLM 0.31.0 / SGLang 0.5.20) follow the
+    /// rows (vLLM 0.31.0 / SGLang 0.5.20) follow the
     /// DeepSeek-V4 convention: `pre`, `post` and `fused_post_pre` time a
     /// layer's attention and FFN sites together (`num_sites=2`); `expand`
     /// and `contract` time one call. RMSNorm is inside `pre` and
@@ -1464,7 +1464,7 @@ pub(crate) mod tests {
         let fallback = tp4.query(&load(RUNTIME, DatabaseMode::Hybrid), &c).unwrap();
         assert_eq!(fallback.source, Source::Sol);
         // Another runtime never borrows this runtime's GLM table.
-        const OTHER: &str = "0.30.0+glm53tail.eb4704514fdf";
+        const OTHER: &str = "0.30.0";
         let other = root
             .path()
             .join("data/gb300/glm53_attention/vllm")

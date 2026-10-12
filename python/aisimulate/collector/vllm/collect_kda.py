@@ -797,8 +797,7 @@ def run_kda_verify_benchmark(
 # library moved b59532f1 -> 17a037d9 (cmake/external_projects/flashkda.cmake:16;
 # fp32 recurrent state between tiles, V-split chosen from the SM count); the
 # torch op schema (csrc/flashkda_registration.cpp) is byte-identical, so the
-# fwd/get_workspace_size calls below are unchanged. 0.30.0 GLM rows were
-# collected on 0.30.0+glm53tail.eb4704514fdf (historical; not mixed with these).
+# fwd/get_workspace_size calls below are unchanged.
 #
 # Row boundary: each row times the kernels between the projections and the
 # output norm. The fused
@@ -1169,8 +1168,8 @@ def run_glm5_next_kda_decode(
 
             def run_recurrent():
                 # kda.py:702-720
-                # FIXME(kernel-limit): unverified claim from GB300 smoke job
-                # 867268 (TP1 shard, 64 local heads): batch 1024 fails with
+                # FIXME(kernel-limit): unverified claim from a GB300 smoke run
+                # (TP1 shard, 64 local heads): batch 1024 fails with
                 # "Triton Error [CUDA]: invalid argument". fused_recurrent_kda
                 # launches grid (NK, NV, N * HV)
                 # (glm5next/nvidia/ops/third_party/kda/kernels.py:98 @v0.31.0),

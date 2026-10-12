@@ -73,9 +73,7 @@ approximation must be retired.
 # model/quant shapes continue to raise and remain recorded failures; this is
 # API compatibility, not a claim that every Cartesian shape is supported.
 # 0.30.0 audit (2026-09-30; source tag v0.30.0 == ced6857afa0e vs v0.27.1,
-# runtime smoke on GB300 in the GLM-5.3-Flash W1 campaign). 0.28.0/0.29.0
-# were NOT audited and stay excluded. (Historical: the 0.30.0 GLM rows were
-# collected on the 0.30.0+glm53tail overlay, which touched no MoE file.)
+# source-only). 0.28.0/0.29.0 were NOT audited and stay excluded.
 # FusedMoEFactory (layer.py:88-131 @0.30.0, :99-140 @0.27.1): every kwarg
 # passed here is unchanged; 0.30.0 only adds defaulted params. swiglu_limit
 # exists at both (:108 / :119), so other models keep passing None.

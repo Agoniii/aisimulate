@@ -240,8 +240,7 @@ frameworks:
       # vllm/models/glm5next/common/ and the KPool indexer from
       # model_executor/layers/sparse_attn_indexer_kpool.py to
       # models/glm5next/nvidia/sparse_indexer.py; it also carries the KPool
-      # tail slot-mapping fix (v1/kv_cache_interface.py:1036-1038) that the
-      # earlier 0.30.0+glm53tail overlay supplied. Docker Hub reported the
+      # tail slot-mapping fix (v1/kv_cache_interface.py:1036-1038). Docker Hub reported the
       # multi-arch index digest below for v0.31.0 on 2026-10-07; its
       # linux/arm64 child (also tag v0.31.0-aarch64; the GB300 platform
       # image, imported for collection as 3f7dd5b7...2b971.sqsh) is

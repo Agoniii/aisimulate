@@ -14,7 +14,7 @@ selection; kernel_source records the branch the framework took.
 
 # Audited 2026-09-30 against sglang v0.5.20 (tag commit
 # 94602c9c2b7cbdb8efd5c52802dac6a1c180089e, source clone) vs v0.5.17
-# (29481685); runtime smoke on GB300 in the GLM-5.3-Flash W1 campaign.
+# (29481685).
 # Dependency pins moved sglang-kernel 0.4.5->0.4.7, flashinfer
 # 0.6.15.post1->0.6.18, sgl-deep-gemm 0.1.5.post1->0.2.0, torch 2.11->2.13,
 # so rows are not cross-version comparable with collect_gemm.py's.

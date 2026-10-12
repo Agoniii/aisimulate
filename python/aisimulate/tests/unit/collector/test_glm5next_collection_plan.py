@@ -41,11 +41,11 @@ def _compat(relative_path: str) -> str:
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 @pytest.mark.parametrize("model_path", [FP8, NVFP4])
-def test_plan_collects_gemm_moe_compute_scale_kda_and_mhc(backend, model_path):
+def test_plan_collects_gemm_moe_kda_and_mhc(backend, model_path):
     plan = build_collection_case_plan(backend=backend, model_path=model_path, gpu_type="gb300")
     assert plan.model_architecture == "Glm5NextForConditionalGeneration"
     assert plan.sm_version == 103
-    assert set(plan.ops) == {"gemm", "moe", "compute_scale", "kda", "mhc_module"}
+    assert set(plan.ops) == {"gemm", "moe", "kda", "mhc_module"}
 
 
 def test_trtllm_plan_has_no_glm_moe_lane():
@@ -154,7 +154,7 @@ def test_vllm_nvfp4_uses_modelopt_only_for_the_glm53flash_checkpoint(monkeypatch
 
 @pytest.mark.parametrize(
     "path",
-    ["collector/vllm/collect_gemm.py", "collector/vllm/collect_moe.py", "collector/vllm/collect_computescale.py"],
+    ["collector/vllm/collect_gemm.py", "collector/vllm/collect_moe.py"],
 )
 @pytest.mark.parametrize(
     "version,accepted",
@@ -174,14 +174,7 @@ def test_vllm_collectors_admit_exactly_the_audited_releases(path, version, accep
 
 @pytest.mark.parametrize(
     "path,fork,names",
-    [
-        ("collector/sglang/collect_gemm.py", "collect_gemm_0520", ("get_gemm_test_cases", "run_gemm")),
-        (
-            "collector/sglang/collect_computescale.py",
-            "collect_computescale_0520",
-            ("get_computescale_test_cases", "run_computescale"),
-        ),
-    ],
+    [("collector/sglang/collect_gemm.py", "collect_gemm_0520", ("get_gemm_test_cases", "run_gemm"))],
 )
 def test_sglang_0_5_20_runs_delegate_to_the_serving_built_fork(path, fork, names):
     """The registry module stays unversioned (changed_ops rejects VersionRoute

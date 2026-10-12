@@ -65,10 +65,7 @@ GLM5NEXT_ARCHITECTURE = "Glm5NextForConditionalGeneration"
 # classified failure) instead of running an unverified dispatch.
 _ARCHITECTURE_COMPAT = {
     ARCHITECTURE: "vllm>=0.24.0,<=0.25.0",
-    # Stock vllm 0.31.0 only (no overlay) — see the GLM audit below. The
-    # earlier 0.30.0 rows were collected on 0.30.0+glm53tail.eb4704514fdf
-    # (overlay patched only the KPool indexer and kv_cache_interface, neither
-    # on the mHC path); GLM no longer targets that runtime.
+    # Stock vllm 0.31.0 only (no overlay) — see the GLM audit below.
     GLM5NEXT_ARCHITECTURE: "vllm==0.31.0",
 }
 

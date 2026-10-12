@@ -41,11 +41,8 @@ _SMOKE_COMMON = {
     "max_model_len": 131079,
 }
 _SMOKE_DECODE = {"batch_sizes": [1, 32], "sequence_lengths": {"1": [2048, 2049, 16384], "32": [4096]}}
-# Small smoke plans. The validation geometries are the in-serving nsys points:
-# vLLM (stock serve, prefix ON, per request prefix/new tokens, all multiples of
-# 4) and SGLang (the clean-truth holdout points profiled in
-# sglang-prefill-gap-profile: B1 T32 KV128, B1 T2042, B1 T8189, B4 T1024
-# KV48128, B32 T320, B32 T1024 KV139264, B32 T8000, B32 T8192 KV3137536).
+# Small smoke plans whose geometries can be compared against in-serving nsys
+# traces of the module (vLLM points are multiples of the IndexPool size 4).
 # "long" holds one ~1M prefill and the 1M decode, plus two regular-length
 # decodes that expose any dependence on the server context limit.
 SMOKE_SWEEPS = {
@@ -88,7 +85,7 @@ SGLANG_ARGS = (
     "--chunked-prefill-size 8192 --mem-fraction-static 0.82 "
     "--max-running-requests 32 --cuda-graph-bs-decode " + " ".join(str(b) for b in range(1, 33))
 )
-# Serving CUDA-graph policy (pgraph smoke v4, clean-truth server flags): vLLM
+# Serving CUDA-graph policy (the serving server flags): vLLM
 # keeps its default FULL_AND_PIECEWISE mode with breakable graphs and these 62
 # capture sizes (its default 11 sizes plus SGLang's 58 prefill buckets);
 # SGLang captures breakable prefill graphs up to 8192 tokens (its own buckets)
@@ -111,7 +108,7 @@ VLLM_ENV = {
 }
 # One GB300 holds ~279 GiB; the FP8 checkpoint's safetensors are 305.8 GiB
 # (zai-org/GLM-5.3-Flash@eb9eb208), the NVFP4 checkpoint's 190.4 GiB. TP1 is
-# therefore an NVFP4-only deployment (campaign decision; capacity fact).
+# therefore an NVFP4-only deployment (capacity fact).
 TP1_CHECKPOINTS = ("nvfp4",)
 
 
@@ -170,9 +167,9 @@ def prepare(args) -> Path:
         # Server context limit (vLLM --max-model-len, SGLang --context-length)
         # of the selected context class; capacity only.
         "max_model_len": max_model_len,
-        # Allocator policy only (no kernel change): the 16384 MiB split the
-        # qualified SGLang FP8 TP2 FPM campaign uses against fragmentation of
-        # the ragged IndexPool MQA-logits buffer at long batched context.
+        # Allocator policy only (no kernel change), e.g. a 16384 MiB split
+        # against fragmentation of the ragged IndexPool MQA-logits buffer at
+        # long batched context.
         "allocator_max_split_size_mb": args.allocator_max_split_mb,
         "serving_graph": (
             {"vllm_cudagraph_capture_sizes": VLLM_PREFILL_GRAPH_CAPTURE_SIZES}
@@ -211,7 +208,7 @@ def prepare(args) -> Path:
     suffix = (f"-smoke-{args.smoke}" if args.smoke else "") + (f"-{args.tag}" if args.tag else "")
     suffix += f"-l{args.layer_id}" if args.layer_id is not None else ""
     suffix += f"-w{args.warmup}" if args.warmup is not None else ""
-    job = f"glm53-v031c-attn-{args.backend}-{args.checkpoint}-tp{args.tp}{suffix}"
+    job = f"glm53-attn-{args.backend}-{args.checkpoint}-tp{args.tp}{suffix}"
     container = f"{args.remote_attempt}"
     runner = f"collector.{args.backend}.glm53flash_attention_runner"
     common = "--manifest /results/manifest.json --output /results/raw"

@@ -473,7 +473,7 @@ def run_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
             return replay(shape_key, static_forward_batch, **k)
 
         prefill_runner.backend.replay = witnessed
-        # State seeding (prefix fill) runs eagerly, as in revision 1; only
+        # State seeding (prefix fill) runs eagerly; only
         # the measured step uses the serving prefill graph. Under the graph
         # the pooled indexer materializes dense batch-wide logits, which at
         # 8+ requests x 64K+ cached tokens per 8192-token seed step exceed

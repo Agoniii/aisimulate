@@ -59,7 +59,7 @@ quantized-weight preparation, and selected-kernel reporting.
 # (schemes/compressed_tensors_w4a4_nvfp4.py:29-31,95-141). This adds the
 # exact 0.25.0 release to the existing lane, not 0.25.1/0.26.0/0.27.0.
 # 0.30.0 audit (2026-09-30, source-only: tag v0.30.0 == ced6857afa0e vs
-# v0.27.1; runtime smoke on GB300 recorded in the GLM-5.3-Flash W1 campaign).
+# v0.27.1).
 # Intermediate 0.28.0/0.29.0 were NOT audited and stay excluded.
 # bf16: UnquantizedLinearMethod now binds its GEMM at __init__ from
 #   kernel_config.linear_backend (layers/linear.py:169-174, apply :234-238);
@@ -89,9 +89,6 @@ quantized-weight preparation, and selected-kernel reporting.
 #   selects FlashInferCuteDsl (:115-123), SM12x FlashInferCutlass (:183-197).
 # Byte-identical helpers: scaled_fp4_quant (_custom_ops.py:1525-1600),
 #   per_block_cast_to_fp8 (utils/deep_gemm.py:737-756).
-# Historical: the GLM-5.3-Flash 0.30.0 rows were collected as
-#   0.30.0+glm53tail.eb4704514fdf (PYTHONPATH overlay of two attention/KV
-#   files, neither on a GEMM path).
 # 0.31.0 audit (2026-10-07, source-only: tag v0.31.0 == db9527a46873 vs
 # v0.30.0 ced6857afa0e; stock image, no overlay). Python dispatch for every
 # lane is unchanged; only line numbers and non-CUDA branches moved.

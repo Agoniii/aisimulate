@@ -33,7 +33,7 @@ def _specs(operations) -> list[dict]:
 # IndexPool attention has a GLM table (glm53_attention_module_perf.parquet).
 #
 # KDA kda_perf kernel_source per (backend, phase): (short conv, delta rule),
-# as collected by Ops W2. Both backends run ONE merged q|k|v conv
+# as collected by collect_kda.py. Both backends run ONE merged q|k|v conv
 # (causal_conv1d_fn, not Kimi's three-call _qkv3). vLLM 0.31.0
 # glm5next/common/kda.py: FlashKDA prefill on SM10x, fused_recurrent_kda
 # decode. SGLang 0.5.20 kda_backend.py: chunk_kda prefill; decode skips the
@@ -326,11 +326,8 @@ class Glm53FlashModel(BaseModel):
             # decode and on every chunk of 64+ new tokens in prefill; vLLM align
             # mode does precopies at Mamba block crossings, which are hidden
             # behind host prep under synchronous scheduling. It is intentionally
-            # not modeled. On GB300 clean truth, prefix-cache ON vs OFF Ops
-            # error changed only slightly or in opposite directions by
-            # backend/phase (SGLang prefill improved about 1.5 points when it
-            # was modeled, SGLang decode worsened 0.5-2.8 points, vLLM
-            # unchanged).
+            # not modeled: on GB300 measurements, modeling it changed Ops error
+            # only slightly and in opposite directions by backend/phase.
             for layer in range(len(d.layer_types)):
                 if backend_name == "vllm":
                     target.append(

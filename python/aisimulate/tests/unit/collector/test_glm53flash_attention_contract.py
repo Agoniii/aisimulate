@@ -518,7 +518,7 @@ def test_launch_selects_one_context_class_and_guards_vllm_alignment(tmp_path):
     assert regular["max_model_len"] == 131079 and regular["geometry"]["tp_size"] == 1
     assert len(regular["only_sets"]) == len(context_class_sets(regular["plan"], "regular"))
     run = (tmp_path / "r" / "run.sbatch").read_text()
-    assert "glm53-v031c-attn-vllm-nvfp4-tp1" in run and "glm53flash-candidate" not in run
+    assert "glm53-attn-vllm-nvfp4-tp1" in run
     long = json.loads((prepare(_launch_args(tmp_path, "l", context_class="long")) / "manifest.json").read_text())
     assert long["max_model_len"] == 1048576 and all(s.startswith("long-") for s in long["only_sets"])
     sglang = prepare(_launch_args(tmp_path, "s", backend="sglang", context_class="long"))
@@ -548,7 +548,7 @@ def test_memory_feasibility_drops_are_generation_time_and_close_the_plan(tmp_pat
         kv_token_capacity=3396928,
         transient_gib=18.0,
         device_gib=276.6,
-        memory_evidence="jobs 867530 867891 870375",
+        memory_evidence="measured capacity log",
     )
     manifest = json.loads((prepare(args) / "manifest.json").read_text())
     assert "glm53flash_attention: dropped 3/" in capsys.readouterr().out

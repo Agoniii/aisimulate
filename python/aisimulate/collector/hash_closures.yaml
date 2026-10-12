@@ -37,7 +37,6 @@ collector.sglang.collect_attn_encoder:
   - collector/cases/base_ops/attention_encoder.yaml
   - __model_cases__
 collector.sglang.collect_computescale:
-  # SGLang 0.5.20 runs are delegated to collect_computescale_0520.py.
   # get_compute_scale_case_specs() reads the "trtllm" section of
   # compute_scale.yaml unconditionally and falls back to gemm.yaml-derived
   # shapes (via get_gemm_case_specs) when that section is empty.

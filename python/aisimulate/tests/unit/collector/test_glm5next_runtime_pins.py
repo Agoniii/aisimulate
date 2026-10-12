@@ -16,7 +16,7 @@ SGLANG_INDEX = "lmsysorg/sglang:v0.5.20@sha256:06e4f2ed21afde4ff513cda65070124e7
 @pytest.mark.parametrize("model_path", GLM_MODEL_PATHS)
 def test_glm_vllm_pin_is_the_stock_0_31_0_release(model_path):
     runtime = require_collector_runtime(
-        "vllm", "0.31.0", requested_ops={"gemm", "moe", "compute_scale"}, model_path=model_path
+        "vllm", "0.31.0", requested_ops={"gemm", "moe", "kda", "mhc_module"}, model_path=model_path
     )
     assert runtime.version == "0.31.0"
     assert runtime.image() == VLLM_INDEX
@@ -27,17 +27,9 @@ def test_glm_vllm_pin_is_the_stock_0_31_0_release(model_path):
 
 
 @pytest.mark.parametrize("model_path", GLM_MODEL_PATHS)
-def test_glm_vllm_pin_rejects_the_retired_tail_overlay_runtime(model_path):
-    with pytest.raises(RuntimeError, match="requires exactly 0.31.0"):
-        require_collector_runtime(
-            "vllm", "0.30.0+glm53tail.eb4704514fdf", requested_ops={"gemm"}, model_path=model_path
-        )
-
-
-@pytest.mark.parametrize("model_path", GLM_MODEL_PATHS)
 def test_glm_sglang_pin_resolves_every_op_to_0_5_20(model_path):
     runtime = require_collector_runtime(
-        "sglang", "0.5.20", requested_ops={"gemm", "moe", "compute_scale"}, model_path=model_path
+        "sglang", "0.5.20", requested_ops={"gemm", "moe", "kda", "mhc_module"}, model_path=model_path
     )
     assert runtime.version == "0.5.20"
     assert runtime.image() == SGLANG_INDEX

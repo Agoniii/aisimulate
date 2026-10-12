@@ -1084,8 +1084,8 @@ def run_glm5_next_kda_context(
                 # (bos loaded from the int32 cu_seqlens that serving also
                 # passes; kernels/ops/attention/fla/kda.py:265-268,377-393,
                 # 556-607,804-850 @v0.5.20), so a step with
-                # tokens * heads * head_dim >= 2**31 overflows. GB300 silicon
-                # (job 723221): (32 heads, batch 64, seq 32768) raised
+                # tokens * heads * head_dim >= 2**31 overflows. On GB300,
+                # (32 heads, batch 64, seq 32768) raised
                 # cudaErrorIllegalAddress, poisoning the worker's CUDA context
                 # for every later cell. Raise before launching instead; the
                 # conv row above is unaffected (int64 token offsets).

@@ -105,12 +105,8 @@ def test_glm_row_conventions_match_the_shared_table(monkeypatch):
     [
         ("vllm", DSV4, "0.24.0", True),
         ("vllm", DSV4, "0.25.0", True),
-        ("vllm", DSV4, "0.30.0+glm53tail.eb4704514fdf", False),
         ("vllm", DSV4, "0.31.0", False),
-        # GLM moved to stock 0.31.0 (no overlay); the 0.30.0+glm53tail runtime
-        # is no longer an audited GLM mHC runtime.
         ("vllm", GLM, "0.31.0", True),
-        ("vllm", GLM, "0.30.0+glm53tail.eb4704514fdf", False),
         ("vllm", GLM, "0.30.0", False),
         ("vllm", GLM, "0.25.0", False),
         ("vllm", GLM, "0.27.1", False),
