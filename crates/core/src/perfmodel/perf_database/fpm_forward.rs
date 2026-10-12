@@ -61,6 +61,7 @@ pub const FPM_FORWARD_PARTITION_POLICY: &str = "balanced_v1";
 /// Legacy collector policy; self-benchmark repeats use a per-row contract.
 pub const FPM_FORWARD_MEASUREMENT_POLICY: &str = "dynamo_native_single_sample_v1";
 const FPM_ROW_MEASUREMENT_POLICY: &str = "per_row_single_sample_or_median_of_3";
+const FPM_FULL_GRID_MEASUREMENT_POLICY: &str = "per_row_single_sample_or_full_grid_median_v1";
 /// `kv_seed_regime` marker for rows whose KV state the collector could not
 /// reach through the real kvwarm chain and fabricated instead. Such rows
 /// are measurements of the wrong regime (observed 2-3.7x inflated on 4-GPU
@@ -428,7 +429,7 @@ fn sha256_file(path: &Path) -> Result<String, AicError> {
 struct SidecarContract {
     schema_version: u64,
     row_count: Option<u64>,
-    per_row_policy: bool,
+    row_median_policy: Option<&'static str>,
     selector_dcp: Option<Option<u32>>,
 }
 fn validate_sidecar(
@@ -486,16 +487,18 @@ fn validate_sidecar(
         )));
     }
     let measurement_policy = metadata.get("measurement_policy").and_then(|v| v.as_str());
-    if !matches!(
-        measurement_policy,
-        Some(FPM_FORWARD_MEASUREMENT_POLICY | FPM_ROW_MEASUREMENT_POLICY)
-    ) {
-        return Err(structural(format!(
-            "unsupported FPM measurement_policy={:?} (expected {FPM_FORWARD_MEASUREMENT_POLICY:?} or {FPM_ROW_MEASUREMENT_POLICY:?}): {}",
-            metadata.get("measurement_policy"),
-            metadata_path.display()
-        )));
-    }
+    let row_median_policy = match measurement_policy {
+        Some(FPM_FORWARD_MEASUREMENT_POLICY) => None,
+        Some(FPM_ROW_MEASUREMENT_POLICY) => Some("kvwarm_median_of_3"),
+        Some(FPM_FULL_GRID_MEASUREMENT_POLICY) => Some("independent_full_grid_median_of_3"),
+        _ => {
+            return Err(structural(format!(
+                "unsupported FPM measurement_policy={:?} (expected {FPM_FORWARD_MEASUREMENT_POLICY:?}, {FPM_ROW_MEASUREMENT_POLICY:?} or {FPM_FULL_GRID_MEASUREMENT_POLICY:?}): {}",
+                metadata.get("measurement_policy"),
+                metadata_path.display()
+            )));
+        }
+    };
     // The commit record names the database identity it was published for;
     // contradictory metadata (a pair copied into the wrong tree with its
     // sidecar) is rejected here, before any row is read.
@@ -544,7 +547,7 @@ fn validate_sidecar(
     Ok(SidecarContract {
         schema_version: schema_version.unwrap(),
         row_count: json_uint(metadata.get("row_count")),
-        per_row_policy: measurement_policy == Some(FPM_ROW_MEASUREMENT_POLICY),
+        row_median_policy,
         selector_dcp,
     })
 }
@@ -661,7 +664,7 @@ fn load_pair(
     let dcp_col = reader.col_optional("dcp");
     let row_policy_col = reader.col_optional("measurement_policy");
     let repeats_col = reader.col_optional("measurement_repeats");
-    if sidecar.per_row_policy && (row_policy_col.is_none() || repeats_col.is_none()) {
+    if sidecar.row_median_policy.is_some() && (row_policy_col.is_none() || repeats_col.is_none()) {
         return Err(structural("FPM per-row measurement policy requires measurement_policy and measurement_repeats columns".into()));
     }
 
@@ -821,14 +824,12 @@ fn load_pair(
                 "FPM row {index} dcp disagrees with the sidecar selector"
             )));
         }
-        if sidecar.per_row_policy {
+        if let Some(median_policy) = sidecar.row_median_policy {
             let policy = row.str_optional(row_policy_col)?;
             let repeats = row.u32_optional(repeats_col)?;
-            if !matches!(
-                (policy, repeats),
-                (Some(FPM_FORWARD_MEASUREMENT_POLICY), Some(1))
-                    | (Some("kvwarm_median_of_3"), Some(3))
-            ) {
+            if (policy, repeats) != (Some(FPM_FORWARD_MEASUREMENT_POLICY), Some(1))
+                && (policy, repeats) != (Some(median_policy), Some(3))
+            {
                 return Err(structural(format!(
                     "FPM row {index} measurement policy/repeats are inconsistent"
                 )));
@@ -1929,6 +1930,106 @@ pub(crate) mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("requires measurement_policy")
+        );
+    }
+
+    #[test]
+    fn full_grid_median_policy_preserves_aggregate_latencies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rows = [
+            RowSpec {
+                workload_kind: "prefill",
+                batch_size: 1,
+                total_prefill_tokens: 128,
+                total_kv_read_tokens: 0,
+                latency_ms: 7.25,
+                measurement: Some(("independent_full_grid_median_of_3", 3)),
+                ..RowSpec::default()
+            },
+            RowSpec {
+                workload_kind: "decode",
+                batch_size: 1,
+                total_prefill_tokens: 0,
+                total_kv_read_tokens: 128,
+                latency_ms: 3.125,
+                measurement: Some((FPM_FORWARD_MEASUREMENT_POLICY, 1)),
+                ..RowSpec::default()
+            },
+        ];
+        write_pair_with(tmp.path(), &rows, |meta| {
+            meta.insert(
+                "measurement_policy".into(),
+                "per_row_single_sample_or_full_grid_median_v1".into(),
+            );
+        });
+        let table = loaded_table(tmp.path());
+        let cells = table
+            .cells()
+            .expect("aggregate pair must load without campaign files");
+        assert_eq!(cells.len(), 1);
+        // Independent oracle: stored fixture latencies are already aggregated.
+        assert_eq!(cells[0].direct_prefill[&(1, 0)][&128], 7.25);
+        assert_eq!(cells[0].direct_decode[&1][&128], 3.125);
+    }
+
+    #[test]
+    fn full_grid_median_policy_rejects_inconsistent_records() {
+        for (sidecar_policy, row_policy, repeats) in [
+            (
+                FPM_FULL_GRID_MEASUREMENT_POLICY,
+                "independent_full_grid_median_of_3",
+                0,
+            ),
+            (
+                FPM_FULL_GRID_MEASUREMENT_POLICY,
+                "independent_full_grid_median_of_3",
+                1,
+            ),
+            (
+                FPM_FULL_GRID_MEASUREMENT_POLICY,
+                "independent_full_grid_median_of_3",
+                6,
+            ),
+            (
+                FPM_FULL_GRID_MEASUREMENT_POLICY,
+                FPM_FORWARD_MEASUREMENT_POLICY,
+                3,
+            ),
+            (FPM_FULL_GRID_MEASUREMENT_POLICY, "kvwarm_median_of_3", 3),
+            (
+                FPM_FULL_GRID_MEASUREMENT_POLICY,
+                "independent_full_grid_median_of_6",
+                6,
+            ),
+            (FPM_FULL_GRID_MEASUREMENT_POLICY, "unknown", 3),
+            (
+                FPM_ROW_MEASUREMENT_POLICY,
+                "independent_full_grid_median_of_3",
+                3,
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let rows = [RowSpec {
+                measurement: Some((row_policy, repeats)),
+                ..RowSpec::default()
+            }];
+            write_pair_with(tmp.path(), &rows, |meta| {
+                meta.insert("measurement_policy".into(), sidecar_policy.into());
+            });
+            let error = loaded_table(tmp.path()).cells().unwrap_err();
+            assert!(error.to_string().contains("policy/repeats"), "{error}");
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        write_pair_with(tmp.path(), &default_rows(), |meta| {
+            meta.insert(
+                "measurement_policy".into(),
+                FPM_FULL_GRID_MEASUREMENT_POLICY.into(),
+            );
+        });
+        let error = loaded_table(tmp.path()).cells().unwrap_err();
+        assert!(
+            error.to_string().contains("requires measurement_policy"),
+            "{error}"
         );
     }
 

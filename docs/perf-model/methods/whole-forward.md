@@ -144,6 +144,22 @@ every row declares a consistent `measurement_policy`/`measurement_repeats`
 pair: `dynamo_native_single_sample_v1`/1 or `kvwarm_median_of_3`/3. Values are
 already aggregated by the producer; the loader preserves their latency.
 
+For independent full-grid repetitions, use the existing
+`per_row_single_sample_or_full_grid_median_v1` sidecar policy. Every row must
+declare `dynamo_native_single_sample_v1`/1 or
+`independent_full_grid_median_of_3`/3. The latter records the producer's median
+of three independent full-grid measurements; it is a different procedure from
+`kvwarm_median_of_3`, and the two per-row sidecar policies cannot be exchanged.
+Other repetition counts and unknown row policies are rejected.
+
+Prediction needs only the aggregated Parquet table and its metadata sidecar.
+The loader preserves the stored latencies and checks the pair's digest, row
+count, identity, workload and duplicate coordinates, as well as the declared
+row policy/count pairs. It does not open raw campaign files, recompute medians
+or assess repeatability and serving accuracy. The publisher must validate
+aggregation and quality evidence before publication; successful loading does
+not qualify the dataset's accuracy.
+
 For a Kimi K3 text profile, an explicit configuration can be:
 
 ```python

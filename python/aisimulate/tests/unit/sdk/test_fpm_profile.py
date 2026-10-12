@@ -1239,6 +1239,94 @@ def _write_external_profile_pair(profile, directory, *, prefill_points=None):
     return path
 
 
+@pytest.fixture
+def full_grid_median_profile(profile_dict, monkeypatch, tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    profile_dict["deployments"][0]["system"] = "h200_sxm"
+    monkeypatch.setenv("AIC_ALLOW_UNLISTED_VERSIONS", "1")
+    monkeypatch.setattr(engine, "get_model", _fail_graph)
+    monkeypatch.setattr(engine, "build_model_config", _fail_graph)
+    monkeypatch.setattr(engine, "_maybe_load_database", _fail_graph)
+    path = _write_external_profile_pair(profile_dict, tmp_path)
+    rows = pq.read_table(path).to_pylist()
+    for row in rows:
+        row.update(measurement_policy="independent_full_grid_median_of_3", measurement_repeats=3)
+    pq.write_table(pa.Table.from_pylist(rows), path)
+    metadata = json.loads(path.with_suffix(".metadata.json").read_text())
+    metadata.update(
+        measurement_policy="per_row_single_sample_or_full_grid_median_v1",
+        parquet_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+    )
+    path.with_suffix(".metadata.json").write_text(json.dumps(metadata))
+    config = _request(
+        profile_dict,
+        estimator_config={
+            "fpm_interpolation": {"method": "direct", "fpm_parquet_path": str(path), "collect_coverage": True},
+            "correction": {"enabled": False},
+        },
+    )
+    return config, path
+
+
+def test_full_grid_medians_query_and_reload_without_campaign_files(full_grid_median_profile, tmp_path):
+    config, path = full_grid_median_profile
+    originals = {file: file.read_bytes() for file in (path, path.with_suffix(".metadata.json"))}
+    # Only the aggregate pair is distributed: these are synthetic stored medians,
+    # not a test of the publisher's aggregation or quality qualification.
+    assert set(tmp_path.iterdir()) == set(originals)
+    queries = [
+        ({"scheduled_requests": {"num_prefill_requests": 1, "sum_prefill_tokens": 1}}, 2.0),
+        ({"scheduled_requests": {"num_decode_requests": 1, "sum_decode_kv_tokens": 1}}, 3.0),
+    ]
+    model = RustForwardPassPerfModel.best_available(config)
+    try:
+        for query, expected in queries:
+            assert model.estimate_forward_pass_time_ms(query) == expected
+        assert model.fpm_query_coverage()["queries"] == {"measured": 2, "interpolated": 0, "unsupported": 0}
+        saved_path = tmp_path / "saved-config.json"
+        saved_path.write_text(json.dumps(model.diagnostics()["provenance"]["config"]))
+    finally:
+        model.close()
+    restored = RustForwardPassPerfModel.best_available(json.loads(saved_path.read_text()))
+    try:
+        assert restored.diagnostics()["provenance"]["config"]["estimator_config"]["fpm_interpolation"][
+            "fpm_parquet_path"
+        ] == str(path)
+        for query, expected in queries:
+            assert restored.estimate_forward_pass_time_ms(query) == expected
+    finally:
+        restored.close()
+    assert {file: file.read_bytes() for file in originals} == originals
+
+
+@pytest.mark.parametrize(
+    "row_changes,sidecar_policy",
+    [
+        ({"measurement_repeats": 1}, "per_row_single_sample_or_full_grid_median_v1"),
+        ({"measurement_repeats": 6}, "per_row_single_sample_or_full_grid_median_v1"),
+        ({"measurement_repeats": None}, "per_row_single_sample_or_full_grid_median_v1"),
+        ({"measurement_policy": "unknown"}, "per_row_single_sample_or_full_grid_median_v1"),
+        ({"measurement_policy": "kvwarm_median_of_3"}, "per_row_single_sample_or_full_grid_median_v1"),
+        ({}, "per_row_single_sample_or_median_of_3"),
+    ],
+)
+def test_full_grid_medians_reject_inconsistent_provenance(full_grid_median_profile, row_changes, sidecar_policy):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    config, path = full_grid_median_profile
+    rows = pq.read_table(path).to_pylist()
+    rows[-1].update(row_changes)
+    pq.write_table(pa.Table.from_pylist(rows), path)
+    metadata = json.loads(path.with_suffix(".metadata.json").read_text())
+    metadata.update(measurement_policy=sidecar_policy, parquet_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    path.with_suffix(".metadata.json").write_text(json.dumps(metadata))
+    with pytest.raises(PerfDataNotAvailableError, match="policy/repeats"):
+        RustForwardPassPerfModel.best_available(config)
+
+
 def test_direct_prefill_kv_first_preserves_public_evidence_and_saved_config(profile_dict, monkeypatch, tmp_path):
     # An irregular collection boundary: each prompt length has its own upper
     # KV coordinate. Synthetic latency is P/256 + K/8192 ms, so the query is
