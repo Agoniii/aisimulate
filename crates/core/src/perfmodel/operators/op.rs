@@ -527,14 +527,26 @@ impl Op {
     /// they're treated as non-attention in the mix-step composition
     /// (matching Python's intent: the module already represents the full
     /// fused attention+projection work and shouldn't be re-decomposed).
+    ///
+    /// GLM-5.3-Flash attention ops carry per-layer names (`attention_N`), so
+    /// they are classified by their explicit phase instead (see
+    /// [`Self::is_glm53_attention`]).
     pub fn is_context_attention(&self) -> bool {
-        self.name() == "context_attention"
+        self.is_glm53_attention(true) || self.name() == "context_attention"
     }
 
     /// True if this op's name matches Python's mix-step filter for the
-    /// generation-attention bucket (`"generation_attention"`).
+    /// generation-attention bucket (`"generation_attention"`), or it is a
+    /// generation-phase GLM-5.3-Flash attention op.
     pub fn is_generation_attention(&self) -> bool {
-        self.name() == "generation_attention"
+        self.is_glm53_attention(false) || self.name() == "generation_attention"
+    }
+
+    /// GLM-5.3-Flash per-layer attention of the given phase. Mixed steps must
+    /// query it at its own prefill or decode shape rather than in the shared
+    /// token-major pass.
+    fn is_glm53_attention(&self, context: bool) -> bool {
+        matches!(self, Op::Glm53Attention(o) if o.is_context == context)
     }
 
     /// Identifies the logits projection GEMM by name. Python special-cases
