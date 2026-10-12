@@ -14,7 +14,7 @@ import random
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from numbers import Real
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -83,6 +83,7 @@ _RUNTIME_TRAFFIC_FIELDS = frozenset(
         "agentic_lanes",
         "agentic_snapshot",
         "agentic_warmup",
+        "agentic_profile",
     }
 )
 
@@ -112,7 +113,6 @@ _AIC_TIMING_FIELD_ALIASES = {
     "database_mode": ("database_mode", "aic_database_mode"),
     "enable_shared_layer": ("enable_shared_layer", "shared_layer", "aic_enable_shared_layer"),
     "strict_provenance": ("strict_provenance", "aic_strict_provenance"),
-    "decode_workload_distribution": ("decode_workload_distribution", "aic_decode_workload_distribution"),
 }
 
 _AIC_FORWARD_MODELS = frozenset({"op_level", "fpm"})
@@ -195,8 +195,6 @@ class AICAFDCompanionPerformanceModel:
 
         timing_model = args.get("timing_model")
         if isinstance(timing_model, Mapping) and timing_model.get("type") == "fixed":
-            if any(args.get(alias) is not None for alias in _AIC_TIMING_FIELD_ALIASES["decode_workload_distribution"]):
-                raise ValueError("decode_workload_distribution is not supported by fixed AFD companion timing")
             if any(args.get(alias) is not None for alias in _AIC_TIMING_FIELD_ALIASES["moe_kernel_source"]):
                 raise ValueError("moe_kernel_source is not supported by fixed AFD companion timing")
             key = "prefill_ms" if role == "prefill" else "decode_ms"
@@ -284,10 +282,6 @@ class AICAFDCompanionPerformanceModel:
                     if fpm_parquet_path is not None
                     else {}
                 )
-                if "decode_workload_distribution" in timing_overrides:
-                    estimator_config["op_level"] = {
-                        "decode_workload_distribution": timing_overrides["decode_workload_distribution"]
-                    }
                 config = ForwardPassPerfModelConfig(
                     model=model_name,
                     system=hardware,
@@ -333,10 +327,6 @@ class AICAFDCompanionPerformanceModel:
                 raw = {metric: latency}
                 source = "aisimulate_core.sdk.rust_engine_step.RustForwardPassPerfModel"
             else:
-                if "decode_workload_distribution" in timing_overrides:
-                    raise ValueError(
-                        "decode_workload_distribution is not supported by the AFD companion legacy estimator"
-                    )
                 if timing_overrides.get("moe_kernel_source") is not None:
                     raise ValueError("moe_kernel_source is not supported by the AFD companion legacy estimator")
                 result = estimator(model_name, hardware, **kwargs)
@@ -375,6 +365,7 @@ class EngineReplayRunnerFactory:
     """
 
     trace_block_size: int = 512
+    determinism: Literal["random", "canonical_v1"] = field(default="random", kw_only=True)
     runtime: EngineReplayRuntime | None = field(default=None, repr=False, compare=False)
     afd_companion_model: AFDCompanionPerformanceModel | None = field(
         default=None,
@@ -404,9 +395,10 @@ class EngineReplayRunnerFactory:
             supports_agentic_lanes=True,
             supports_agentic_snapshots=True,
             supports_agentic_warmup=True,
+            supports_agentic_profile=True,
             supported_agentic_topologies=("agg", "disagg"),
             supported_agentic_backends=("vllm", "sglang"),
-            supports_agentic_host_offload=False,
+            supports_agentic_host_offload=True,
             supports_agentic_speculative_decoding=False,
             agentic_qualification="functional_only",
         )
@@ -416,6 +408,7 @@ class EngineReplayRunnerFactory:
             worker_id=worker_id,
             capabilities=self.capabilities(),
             trace_block_size=self.trace_block_size,
+            determinism=self.determinism,
             runtime=self.runtime,
             afd_companion_model=self.afd_companion_model,
         )
@@ -428,6 +421,7 @@ class EngineReplayRunner:
     worker_id: int
     capabilities: RunnerCapabilities
     trace_block_size: int = 512
+    determinism: Literal["random", "canonical_v1"] = field(default="random", kw_only=True)
     runtime: EngineReplayRuntime | None = None
     afd_companion_model: AFDCompanionPerformanceModel | None = None
 
@@ -462,6 +456,12 @@ class EngineReplayRunner:
         output_requirements: ReplayOutputRequirements | None = None,
     ) -> ReplayReport:
         output_requirements = output_requirements or ReplayOutputRequirements()
+        if self.determinism not in {"random", "canonical_v1"}:
+            raise ValueError(f"unsupported replay determinism: {self.determinism!r}")
+        if self.determinism != "random" and (
+            spec.backend_deployment.deployment_mode in {"afd", "afd+pd"} or spec.backend_deployment.encoder is not None
+        ):
+            raise InvalidRunnerError("canonical determinism requires native text replay")
         if output_requirements.capture_telemetry:
             raise InvalidRunnerError("EngineReplayRunner's JSON runtime does not yet expose replay telemetry")
         if spec.workload.get("source_type") is not None and "length_sampler" in spec.workload:
@@ -542,6 +542,10 @@ class EngineReplayRunner:
             if "spec" not in execution_spec:
                 execution_spec = {"spec": execution_spec}
             execution_spec["capture_performance_diagnostics"] = True
+        if self.determinism != "random":
+            if "spec" not in execution_spec:
+                execution_spec = {"spec": execution_spec}
+            execution_spec["determinism"] = self.determinism
         execution_spec_json = json.dumps(
             execution_spec,
             allow_nan=False,
@@ -1191,8 +1195,6 @@ def _pop_aic_timing_overrides(rank: dict[str, JSONValue], role: str) -> dict[str
         if not configured:
             continue
         value = rank.pop(configured[0])
-        if target == "decode_workload_distribution" and value is None:
-            continue
         if target in {"pp", "moe_tp_size", "moe_ep_size", "wideep_num_slots", "cp_size", "dcp"}:
             value = _positive_int(value, f"engine provider {role} {target}")
         elif target == "fpm_profile":
@@ -1347,6 +1349,35 @@ def _materialize_sla(spec: ReplaySpec) -> dict[str, JSONValue]:
         for key in ("ttft_ms", "itl_ms", "e2e_ms")
         if raw.get(key) is not None
     }
+
+
+def canonical_performance_config(config: Mapping[str, Any], *, worker_type: str) -> dict[str, Any]:
+    """Normalize Runner timing metadata through the native estimator contract."""
+    from . import _runtime
+
+    return json.loads(_runtime.canonical_timing_config_json(json.dumps(dict(config), allow_nan=False), worker_type))
+
+
+def materialize_engine_launch_config(
+    deployment_backend: str,
+    deployment_backend_version: str,
+    parallel_config: Mapping[str, JSONValue],
+    raw_config: Mapping[str, JSONValue],
+    role: str,
+) -> dict[str, JSONValue]:
+    """Resolve Runner inputs into the canonical engine launch contract for adapters."""
+    from . import _runtime
+
+    descriptor = _materialize_engine_role(
+        deployment_backend, deployment_backend_version, parallel_config, raw_config, role
+    )
+    descriptor["rank"]["worker_type"] = role
+    return json.loads(
+        _runtime.engine_launch_from_replay_role_json(
+            json.dumps(descriptor, allow_nan=False),
+            _startup_delay_ms(raw_config) / 1000.0,
+        )
+    )
 
 
 def _materialize_engine_role(
@@ -1648,8 +1679,6 @@ def _materialize_engine_role(
     # model. They have already served their non-timing purposes and must not be
     # interpreted as an attempt to override that concrete timing model.
     if not uses_aic_timing:
-        if "decode_workload_distribution" in aic_timing_overrides:
-            raise ValueError(f"engine provider {role} decode_workload_distribution requires an AIC timing model")
         if any(
             is_active_engine_model_control(name, aic_timing_overrides.get(name)) for name in ENGINE_MODEL_CONTROL_FIELDS
         ):
@@ -1845,27 +1874,23 @@ def _manual_state_cache(rank: Mapping[str, JSONValue], backend: str, role: str) 
     state_cache = StateCacheConfig.model_validate(raw)
     if rank.get("prefix_match_unit") is not None and rank.get("aic_nextn") is not None:
         raise ValueError("prefix_match_unit does not support speculative decoding")
-    if backend != "vllm" or role != "aggregated":
-        raise ValueError("state_cache requires backend=vllm and an aggregated G1 worker")
+    if backend != "vllm" or role not in ("aggregated", "prefill", "decode"):
+        raise ValueError("state_cache requires backend=vllm and an aggregated, prefill or decode G1 worker")
     if rank.get("native_host_offload") is not None:
         raise ValueError("state_cache supports G1 only; native_host_offload is not supported")
     if rank.get("g3_offload") is not None:
         raise ValueError("state_cache supports G1 only; g3_offload is not supported")
+    # Only prefill and decode roles transfer KV.
+    transfer = ("kv_transfer_bytes_per_token", "kv_transfer_bandwidth") if role == "aggregated" else ()
     conflicts = [
         name
-        for name in (
-            "gpu_memory_utilization",
-            "mem_fraction_static",
-            "free_gpu_memory_fraction",
-            "kv_transfer_bytes_per_token",
-            "kv_transfer_bandwidth",
-        )
+        for name in ("gpu_memory_utilization", "mem_fraction_static", "free_gpu_memory_fraction", *transfer)
         if rank.get(name) is not None
     ]
     if rank.get("cuda_graph_reserved_bytes") not in (None, 0):
         conflicts.append("cuda_graph_reserved_bytes")
     # Rust serializes this default explicitly; it does not enable PD transfer.
-    if rank.get("kv_transfer_timing_mode") not in (None, "full_prompt"):
+    if role == "aggregated" and rank.get("kv_transfer_timing_mode") not in (None, "full_prompt"):
         conflicts.append("kv_transfer_timing_mode")
     if conflicts:
         raise ValueError(f"state_cache rejects capacity/transfer overrides: {', '.join(conflicts)}")
@@ -2076,6 +2101,7 @@ def _normalize_engine_replay_report(report: Mapping[str, JSONValue], *, include_
             "agentic_lanes",
             "agentic_snapshots",
             "agentic_phases",
+            "agentic_profile",
             "agentic_model_projection",
             "weka_nested_timestamp_basis",
             "fpm_query_evidence",
