@@ -1192,8 +1192,8 @@ def test_saved_profile_compiler_controls_merge_with_caller_options(native_profil
     assert controls["features"]["attention_kv_weight"] == 7
 
 
-def _write_external_profile_pair(profile, directory):
-    """Generate routing/identity evidence; these 2/3 ms rows are not silicon data."""
+def _write_external_profile_pair(profile, directory, *, prefill_points=None):
+    """Generate routing/identity evidence; these synthetic rows are not silicon data."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -1208,12 +1208,16 @@ def _write_external_profile_pair(profile, directory):
             "workload_kind": phase,
             "partition_policy": "balanced_v1",
             "batch_size": 1,
-            "total_prefill_tokens": 1 if phase == "prefill" else 0,
+            "total_prefill_tokens": tokens,
             "total_kv_read_tokens": kv,
             "latency_ms": latency,
             "kv_seed_regime": "real_kv",
         }
-        for phase, kv, latency in [("prefill", 0, 2.0), ("decode", 1, 3.0), ("decode", 64, 3.0)]
+        for phase, tokens, kv, latency in [
+            *[("prefill", *point) for point in (prefill_points or [(1, 0, 2.0)])],
+            ("decode", 0, 1, 3.0),
+            ("decode", 0, 64, 3.0),
+        ]
     ]
     path = directory / "synthetic-profile.parquet"
     pq.write_table(pa.Table.from_pylist(rows), path)
@@ -1233,6 +1237,76 @@ def _write_external_profile_pair(profile, directory):
         )
     )
     return path
+
+
+def test_direct_prefill_kv_first_preserves_public_evidence_and_saved_config(profile_dict, monkeypatch, tmp_path):
+    # An irregular collection boundary: each prompt length has its own upper
+    # KV coordinate. Synthetic latency is P/256 + K/8192 ms, so the query is
+    # 10.5 + 18 = 28.5 ms; these values are not an accuracy qualification.
+    points = [
+        (2048, 131072, 24.0),
+        (2048, 253920, 38.99609375),
+        (4096, 131072, 32.0),
+        (4096, 251872, 46.74609375),
+    ]
+    profile_dict["context_length"] = 256000
+    profile_dict["deployments"][0]["system"] = "h200_sxm"
+    monkeypatch.setenv("AIC_ALLOW_UNLISTED_VERSIONS", "1")
+    monkeypatch.setattr(engine, "get_model", _fail_graph)
+    monkeypatch.setattr(engine, "build_model_config", _fail_graph)
+    monkeypatch.setattr(engine, "_maybe_load_database", _fail_graph)
+    path = _write_external_profile_pair(profile_dict, tmp_path, prefill_points=points)
+    config = _request(
+        profile_dict,
+        estimator_config={
+            "fpm_interpolation": {"method": "direct", "fpm_parquet_path": str(path), "collect_coverage": True},
+            "correction": {"enabled": False},
+        },
+    )
+    metrics = {
+        "scheduled_requests": {
+            "num_prefill_requests": 1,
+            "sum_prefill_tokens": 2688,
+            "sum_prefill_kv_tokens": 147456,
+        }
+    }
+    model = RustForwardPassPerfModel.best_available(config)
+    try:
+        detailed = model.estimate_forward_pass_detailed(metrics)
+        assert detailed["latency_ms"] == pytest.approx(28.5)
+        query = detailed["ranks"][0]["queries"][0]
+        assert query["resolution"] == "cross_kv_interpolation"
+        assert query["query"] == {
+            "batch_size": 1.0,
+            "total_prefill_tokens": 2688.0,
+            "total_kv_read_tokens": 147456.0,
+        }
+        assert [
+            (
+                point["coordinates"]["total_prefill_tokens"],
+                point["coordinates"]["total_kv_read_tokens"],
+                point["latency_ms"],
+            )
+            for point in query["support"]
+        ] == points
+        weights = [point["weight"] for point in query["support"]]
+        # Token weights are 11/16 and 5/16; the KV upper weights are
+        # 512/3839 and 512/3775 respectively. These are their leaf products.
+        assert weights == pytest.approx([36597 / 61424, 5632 / 61424, 16315 / 60400, 2560 / 60400])
+        assert all(0.0 <= weight <= 1.0 for weight in weights)
+        assert sum(weights) == pytest.approx(1.0)
+        assert sum(point["latency_ms"] * point["weight"] for point in query["support"]) == pytest.approx(28.5)
+        assert model.fpm_query_coverage()["queries"] == {"measured": 0, "interpolated": 1, "unsupported": 0}
+        saved = json.loads(json.dumps(model.diagnostics()["provenance"]["config"]))
+        assert saved["estimator_config"]["fpm_interpolation"]["method"] == "direct"
+    finally:
+        model.close()
+    reloaded = RustForwardPassPerfModel.best_available(saved)
+    try:
+        assert reloaded.estimate_forward_pass_detailed(metrics) == detailed
+        assert reloaded.estimate_forward_pass_time_ms(metrics) == pytest.approx(28.5)
+    finally:
+        reloaded.close()
 
 
 @pytest.mark.parametrize(
