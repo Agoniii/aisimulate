@@ -18,6 +18,11 @@ import yaml
 from aisimulate.fpm_profile import FpmModelProfile
 
 from .config_profile import load_model_config, profile_from_observations, validate_overrides
+from .runtime_collection import (  # noqa: F401
+    collection_runtime_review,
+    verify_collection_runtime_bindings,
+    verify_collection_runtime_plans,
+)
 from .schema import (
     AGENTX_REFERENCE_CONTEXT,
     CollectionSpec,
