@@ -5,9 +5,12 @@
 import json
 from collections import Counter
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
+import yaml
 
+import aisimulate_core
 from aisimulate_core.sdk import ForwardPassPerfModelConfig, RustForwardPassPerfModel, common, models
 from aisimulate_core.sdk.config import ModelConfig
 from aisimulate_core.sdk.errors import PerfDataNotAvailableError
@@ -162,7 +165,8 @@ def test_unpinned_checkpoint_quantization_fails_explicitly(monkeypatch, quant):
 def test_tp1_weight_inventory_matches_gb300_admission(backend):
     # Measured: NVFP4 TP1 fits one GB300; FP8 TP1 runs out of memory while
     # creating weights. The payload inventory alone places FP8 above capacity.
-    capacity = 298013687808  # GB300 mem_capacity in systems/gb300.yaml
+    system = yaml.safe_load((Path(aisimulate_core.__file__).parent / "systems" / "gb300.yaml").read_text())
+    capacity = int(system["gpu"]["mem_capacity"])
     fp8 = build("zai-org/GLM-5.3-Flash", backend, tp=1)
     nvfp4 = build("nvidia/GLM-5.3-Flash-NVFP4", backend, tp=1)
     assert fp8.get_resident_weights_bytes() > capacity
