@@ -99,16 +99,6 @@ pub fn best_available_model(
     ForwardPassPerfModel::best_available(config)
 }
 
-/// The qualified direct-prefill method is on the canonical returned model.
-pub fn predict_graph_prefill(
-    model: &ForwardPassPerfModel,
-    bs: u32,
-    isl: u32,
-    prefix: u32,
-) -> Result<f64, AicError> {
-    model.predict_prefill_latency(bs, isl, prefix)
-}
-
 pub fn best_available_model_with_roots(
     mut config: ForwardPassPerfModelConfig,
     systems_root: impl AsRef<Path>,
@@ -165,42 +155,13 @@ mod tests {
         // v19: Dsv41AttentionOp gained kv_cache_layout.
         // v20: FpmForwardOp gained original_fmha_quant_mode for selector diagnostics.
         // v21: EngineConfig and MoeOp gained exact moe_kernel_source identity.
-        // v22: observed MoE selection and exact prefill graph composites.
         // v23: ParallelMapping gained optional recorded DCP identity.
         // v24: FpmForwardOp carries typed DCP separately from matching strings.
         // v25: SOL/direct interpolation selector combined with typed DCP.
         // v26: attention / MLA / DSA ops gained tail-appended decode-CP dcp_size.
-        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 26);
+        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 27);
         assert_eq!(FPM_VERSION, 1);
         assert_eq!(ForwardPassMetrics::default().version, FPM_VERSION);
-    }
-
-    #[test]
-    fn direct_graph_api_rejects_an_unselected_regression_model() {
-        let model = regression_model().unwrap();
-        assert!(predict_graph_prefill(&model, 1, 1024, 0).is_err());
-        let mut controls = EstimatorConfig::default();
-        controls.op_level.prefill_graph_profile =
-            Some("sglang_glm52_nvfp4_vr200_tp4_graph_v1".into());
-        controls.op_level.prefill_graph_profile_id =
-            Some("829a83e1629ba546dd4bd90e75a2e2496b7fb24ddc8b60dfbf076ba02312cbce".into());
-        assert!(controls.op_level.decode_workload_distribution.is_none());
-        let mut config = ForwardPassPerfModelConfig::new(
-            "missing-model",
-            "missing-system",
-            BackendKind::Sglang,
-            ForwardPassWorkerType::Prefill,
-        );
-        config.estimator_config = controls;
-        // Auto/default correction cannot admit a direct-only graph profile.
-        // This fails before Python/model/system lookup despite nonexistent data.
-        assert!(
-            ForwardPassPerfModel::best_available(config)
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("requires explicit")
-        );
     }
 
     struct LatencyOnlyProvider;

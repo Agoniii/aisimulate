@@ -19,6 +19,27 @@ const DEFAULT_CLIP_MAX_NEW_TOKENS: usize = 4_096;
 const DEFAULT_SCHEDULE_CONSERVATIVENESS: f64 = 1.0;
 const DEFAULT_HOST_OFFLOAD_BANDWIDTH_GBPS: f64 = 32.0;
 
+fn serialize_scheduler_limit<S: serde::Serializer>(
+    value: &usize,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if serializer.is_human_readable() && *value == usize::MAX {
+        serializer.serialize_none()
+    } else {
+        value.serialize(serializer)
+    }
+}
+
+fn deserialize_scheduler_limit<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<usize, D::Error> {
+    if deserializer.is_human_readable() {
+        Option::<usize>::deserialize(deserializer).map(|value| value.unwrap_or(usize::MAX))
+    } else {
+        usize::deserialize(deserializer)
+    }
+}
+
 fn default_num_gpu_blocks() -> usize {
     16_384
 }
@@ -478,11 +499,17 @@ pub struct EngineConfig {
     /// Optional prompt-plus-output token limit for every backend.
     /// Prompts at or above the limit are rejected; generation stops at the limit.
     pub max_model_len: Option<usize>,
-    /// Maximum concurrently runnable sequences.
-    #[serde(default = "default_max_num_seqs")]
+    /// Maximum concurrently runnable sequences. JSON null means unbounded.
+    #[serde(
+        default = "default_max_num_seqs",
+        serialize_with = "serialize_scheduler_limit"
+    )]
     pub max_num_seqs: usize,
-    /// Per-pass token budget.
-    #[serde(default = "default_max_num_batched_tokens")]
+    /// Per-pass token budget. JSON null means unbounded.
+    #[serde(
+        default = "default_max_num_batched_tokens",
+        serialize_with = "serialize_scheduler_limit"
+    )]
     pub max_num_batched_tokens: usize,
     /// Admit vLLM prefills only once every N attention-DP group passes.
     #[serde(default = "default_prefill_schedule_interval")]
@@ -572,9 +599,15 @@ struct EngineConfigWire {
     block_size: Option<usize>,
     #[serde(default)]
     max_model_len: Option<usize>,
-    #[serde(default = "default_max_num_seqs")]
+    #[serde(
+        default = "default_max_num_seqs",
+        deserialize_with = "deserialize_scheduler_limit"
+    )]
     max_num_seqs: usize,
-    #[serde(default = "default_max_num_batched_tokens")]
+    #[serde(
+        default = "default_max_num_batched_tokens",
+        deserialize_with = "deserialize_scheduler_limit"
+    )]
     max_num_batched_tokens: usize,
     #[serde(default = "default_prefill_schedule_interval")]
     prefill_schedule_interval: usize,
@@ -763,25 +796,12 @@ impl EngineConfig {
                 "state_cache is supported only for backend=vllm"
             );
             ensure!(
-                self.worker_type == WorkerType::Aggregated,
-                "state_cache is supported only for worker_type=aggregated"
-            );
-            ensure!(
                 self.native_host_offload.is_none(),
                 "state_cache does not support native_host_offload in the G1-only implementation"
             );
             ensure!(
                 self.g3_offload.is_none(),
                 "state_cache does not support g3_offload in the G1-only implementation"
-            );
-            ensure!(
-                self.kv_transfer_bytes_per_token.is_none() && self.kv_transfer_bandwidth.is_none(),
-                "state_cache does not support kv_transfer_bytes_per_token or kv_transfer_bandwidth"
-            );
-            // Keep the default accepted, including serialized configs that emit it explicitly.
-            ensure!(
-                self.kv_transfer_timing_mode == TransferTimingMode::FullPrompt,
-                "state_cache does not support non-default kv_transfer_timing_mode"
             );
             ensure!(
                 self.prefix_match_unit.is_none() || self.aic_nextn.is_none(),
@@ -802,7 +822,8 @@ impl EngineConfig {
         Ok(())
     }
 
-    pub(crate) fn validate(&self) -> Result<()> {
+    /// Validate rank configuration without constructing a scheduler or timing provider.
+    pub fn validate(&self) -> Result<()> {
         self.validate_state_cache()?;
         ensure!(self.num_gpu_blocks > 0, "num_gpu_blocks must be positive");
         ensure!(self.block_size > 0, "block_size must be positive");
@@ -859,6 +880,12 @@ impl EngineConfig {
                 "enable_chunked_prefill=false is not supported for backend=sglang"
             );
             self.sglang.validate()?;
+            ensure!(
+                self.sglang
+                    .chunked_prefill_size
+                    .is_multiple_of(self.block_size),
+                "sglang.chunked_prefill_size must be divisible by block_size"
+            );
         }
         ensure!(
             !self.emit_kv_token_ids || self.emit_kv_events,
@@ -985,6 +1012,16 @@ impl EngineConfig {
             self.kv_transfer_bandwidth
                 .is_none_or(|bandwidth| bandwidth.is_finite() && bandwidth >= 0.0),
             "kv_transfer_bandwidth must be finite and non-negative"
+        );
+        // Only the prefill source prices the handoff, so a positive bandwidth
+        // needs payload bytes rather than the topology's fallback latency.
+        ensure!(
+            self.worker_type != WorkerType::Prefill
+                || self
+                    .kv_transfer_bandwidth
+                    .is_none_or(|bandwidth| bandwidth <= 0.0)
+                || self.kv_transfer_bytes_per_token.is_some(),
+            "kv_transfer_bandwidth requires kv_transfer_bytes_per_token on prefill workers"
         );
         match &self.timing_model {
             TimingModelConfig::Polynomial => {}
@@ -1201,20 +1238,10 @@ mod tests {
     }
 
     #[test]
-    fn state_cache_rejects_non_vllm_disaggregated_and_host_offload_configs() {
+    fn state_cache_rejects_non_vllm_and_offload_configs() {
         for (field, value, message) in [
             ("backend", serde_json::json!("sglang"), "backend=vllm"),
             ("backend", serde_json::json!("trtllm"), "backend=vllm"),
-            (
-                "worker_type",
-                serde_json::json!("prefill"),
-                "worker_type=aggregated",
-            ),
-            (
-                "worker_type",
-                serde_json::json!("decode"),
-                "worker_type=aggregated",
-            ),
             (
                 "native_host_offload",
                 serde_json::json!({"num_host_blocks": 8}),
@@ -1246,28 +1273,51 @@ mod tests {
                 serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
             assert_eq!(config, roundtrip);
         }
-        for (field, value) in [
-            ("kv_transfer_bytes_per_token", serde_json::json!(16)),
-            ("kv_bytes_per_token", serde_json::json!(16)),
-            ("kv_transfer_bandwidth", serde_json::json!(0.0)),
-            (
-                "kv_transfer_timing_mode",
-                serde_json::json!("destination_missing"),
-            ),
-        ] {
-            let mut input = state_cache_config_json();
-            input[field] = value;
-            assert!(
-                serde_json::from_value::<EngineConfig>(input.clone()).is_err(),
-                "{field}"
-            );
-            input.as_object_mut().unwrap().remove("state_cache");
-            let mut config: EngineConfig = serde_json::from_value(input).unwrap();
-            config.validate().unwrap();
-            config.state_cache = Some(StateCacheConfig {
-                bytes_per_request: 1500,
+    }
+
+    #[test]
+    fn prefill_bandwidth_requires_transfer_bytes() {
+        let config = |worker_type: &str, bandwidth: f64, bytes: Option<usize>| {
+            let mut input = serde_json::json!({
+                "worker_type": worker_type,
+                "kv_transfer_bandwidth": bandwidth,
             });
-            assert!(config.validate().is_err(), "{field}");
+            if let Some(bytes) = bytes {
+                input["kv_transfer_bytes_per_token"] = serde_json::json!(bytes);
+            }
+            serde_json::from_value::<EngineConfig>(input)
+                .unwrap()
+                .validate()
+        };
+        let error = config("prefill", 50.0, None).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("kv_transfer_bandwidth requires kv_transfer_bytes_per_token"),
+            "{error}"
+        );
+        // Zero bandwidth keeps its legacy "disabled" meaning; only the prefill
+        // source prices the transfer.
+        config("prefill", 0.0, None).unwrap();
+        config("prefill", 50.0, Some(16)).unwrap();
+        config("decode", 50.0, None).unwrap();
+        config("aggregated", 50.0, None).unwrap();
+    }
+
+    #[test]
+    fn state_cache_accepts_transfer_fields_on_every_role() {
+        // Replay descriptors omit worker_type until a stage assigns it, so
+        // transfer settings must deserialize before the role is known.
+        for worker_type in [None, Some("prefill"), Some("decode")] {
+            let mut input = state_cache_config_json();
+            if let Some(worker_type) = worker_type {
+                input["worker_type"] = serde_json::json!(worker_type);
+            }
+            input["kv_transfer_bytes_per_token"] = serde_json::json!(16);
+            input["kv_transfer_bandwidth"] = serde_json::json!(50.0);
+            input["kv_transfer_timing_mode"] = serde_json::json!("destination_missing");
+            let config: EngineConfig = serde_json::from_value(input).unwrap();
+            config.validate().unwrap();
         }
     }
 
