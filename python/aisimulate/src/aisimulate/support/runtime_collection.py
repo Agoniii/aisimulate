@@ -38,6 +38,18 @@ def _read(reference: dict[str, str], *, plan: bool = False) -> tuple[Path, dict[
     return path, document
 
 
+def _checkpoint_observation_index(checkpoint_path: Path, checkpoint: dict[str, Any]) -> Path:
+    recorded = checkpoint.get("runtime_observations")
+    if not isinstance(recorded, str) or not recorded.strip():
+        raise ValueError("collector checkpoint records no runtime observation index")
+    index = Path(recorded)
+    if not index.is_absolute():
+        index = checkpoint_path.resolve().parent / index
+    if index.is_symlink() or not index.is_file():
+        raise ValueError(f"runtime observation index must be a regular file: {index}")
+    return index.resolve()
+
+
 def _differences(accepted: Any, collection: Any, field: str = "") -> list[dict[str, Any]]:
     if accepted == collection:
         return []
@@ -322,7 +334,7 @@ def verify_collection_runtime_bindings(request: SupportRequest, bindings: list[d
             if (
                 checkpoint.get("schema") != CHECKPOINT_SCHEMA
                 or checkpoint.get("plan_sha256") != plan.sha256
-                or Path(checkpoint.get("runtime_observations", "")).absolute() != index
+                or _checkpoint_observation_index(checkpoint_path, checkpoint) != index.resolve()
                 or checkpoint.get("runtime_observation_attempt_id") != binding["attempt_id"]
                 or set(checkpoint.get("cells", {})) - {value.cell_id for value in plan.cells}
             ):

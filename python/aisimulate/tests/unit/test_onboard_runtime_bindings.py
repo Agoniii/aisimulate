@@ -747,3 +747,216 @@ def test_default_readiness_requires_compatible_raw_memory_without_explicit_bindi
     report = collection_readiness.assess_readiness(request, root, root / "fpm-checkpoint")
     assert not report["ready_for_full_collection"]
     assert "runtime build/source" in " ".join(report["blockers"])
+
+
+@pytest.fixture
+def default_collection(tmp_path, capsys):
+    _, request, _, root = _completed_runtime_collection(tmp_path, capsys)
+    checkpoint_path = root / "fpm-checkpoint/fpm_forward.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
+    campaign = root / "fpm-artifacts" / checkpoint["plan_sha256"][:16]
+    args = _parser().parse_args(json.loads((root / "commands.json").read_text())["fpm_plan_local"][3:])
+    _write(campaign / "generator-overrides.json", _load_generator_overrides(args))
+    return request, root, checkpoint_path
+
+
+def test_missing_runtime_index_preserves_all_cell_reports(default_collection):
+    from aisimulate.support.collection_readiness import assess_readiness
+
+    request, root, checkpoint_path = default_collection
+    checkpoint = json.loads(checkpoint_path.read_text())
+    original = assess_readiness(request, root, checkpoint_path.parent)
+    assert original["runtime_compatibility"]["status"] == "complete"
+    assert len(original["selected_cells"]) == 2
+    checkpoint.pop("runtime_observations")
+    _write(checkpoint_path, checkpoint)
+
+    report = assess_readiness(request, root, checkpoint_path.parent)
+
+    assert report["selected_cells"] == original["selected_cells"]
+    assert report["campaigns"][0]["cells"] == original["campaigns"][0]["cells"]
+    assert not report["ready_for_full_collection"]
+    assert report["runtime_compatibility"] is None
+    assert "collector checkpoint records no runtime observation index" in " ".join(report["blockers"])
+
+
+@pytest.mark.parametrize("path_kind", ["relative", "symlinked_directory"])
+def test_default_readiness_resolves_index_from_checkpoint(default_collection, tmp_path, monkeypatch, path_kind):
+    from aisimulate.support.collection_readiness import assess_readiness
+
+    request, root, checkpoint_path = default_collection
+    checkpoint = json.loads(checkpoint_path.read_text())
+    index = Path(checkpoint["runtime_observations"])
+    if path_kind == "relative":
+        checkpoint["runtime_observations"] = str(Path("..") / index.relative_to(root))
+    else:
+        alias = tmp_path / "campaign-alias"
+        alias.symlink_to(index.parent, target_is_directory=True)
+        checkpoint["runtime_observations"] = str(alias / index.name)
+    _write(checkpoint_path, checkpoint)
+    elsewhere = tmp_path / "unrelated-working-directory"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    report = assess_readiness(request, root, checkpoint_path.parent)
+
+    assert report["runtime_compatibility"] is not None, report["blockers"]
+    assert report["runtime_compatibility"]["status"] == "complete"
+    assert len(report["selected_cells"]) == 2
+    for phase in report["runtime_compatibility"]["phases"].values():
+        assert phase["binding"]["observations"] == _ref(index.resolve())
+
+
+@pytest.mark.parametrize("index_state", ["empty", "null", "non_string", "directory", "missing_file", "invalid_json"])
+def test_unusable_runtime_index_preserves_all_cell_reports(default_collection, index_state):
+    from aisimulate.support.collection_readiness import assess_readiness
+
+    request, root, checkpoint_path = default_collection
+    original = assess_readiness(request, root, checkpoint_path.parent)
+    checkpoint = json.loads(checkpoint_path.read_text())
+    index = Path(checkpoint["runtime_observations"])
+    if index_state == "invalid_json":
+        index.write_text("{")
+    else:
+        checkpoint["runtime_observations"] = {
+            "empty": "",
+            "null": None,
+            "non_string": 17,
+            "directory": str(index.parent),
+            "missing_file": str(index.parent / "missing.json"),
+        }[index_state]
+        _write(checkpoint_path, checkpoint)
+
+    report = assess_readiness(request, root, checkpoint_path.parent)
+
+    assert report["selected_cells"] == original["selected_cells"]
+    assert report["campaigns"][0]["cells"] == original["campaigns"][0]["cells"]
+    assert not report["ready_for_full_collection"]
+    assert report["runtime_compatibility"] is None
+    assert any("runtime memory:" in reason for reason in report["blockers"])
+
+
+def test_unreadable_runtime_index_preserves_all_cell_reports(default_collection, monkeypatch):
+    from aisimulate.support.collection_readiness import assess_readiness
+
+    request, root, checkpoint_path = default_collection
+    original = assess_readiness(request, root, checkpoint_path.parent)
+    index = Path(json.loads(checkpoint_path.read_text())["runtime_observations"]).resolve()
+    read_bytes = Path.read_bytes
+
+    def denied_index(path):
+        if path.resolve() == index:
+            raise PermissionError("runtime observation index is not readable")
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", denied_index)
+    report = assess_readiness(request, root, checkpoint_path.parent)
+
+    assert report["selected_cells"] == original["selected_cells"]
+    assert report["campaigns"][0]["cells"] == original["campaigns"][0]["cells"]
+    assert not report["ready_for_full_collection"]
+    assert report["runtime_compatibility"] is None
+    assert "runtime observation index is not readable" in " ".join(report["blockers"])
+
+
+@pytest.mark.parametrize("formal_has_cells", [False, True])
+def test_formal_runtime_evidence_supersedes_only_attempted_smoke_cells(default_collection, formal_has_cells):
+    from aisimulate.support.collection_readiness import assess_readiness
+
+    request, root, checkpoint_path = default_collection
+    formal = json.loads(checkpoint_path.read_text())
+    campaign = root / "fpm-artifacts" / formal["plan_sha256"][:16]
+    smoke = campaign / "smoke"
+    shutil.copytree(campaign, smoke, ignore=shutil.ignore_patterns("smoke"))
+    smoke_checkpoint = copy.deepcopy(formal)
+    smoke_checkpoint["runtime_observations"] = str(smoke / Path(formal["runtime_observations"]).relative_to(campaign))
+    _write(checkpoint_path.with_name("fpm_forward_smoke.json"), smoke_checkpoint)
+    checkpoint_path.unlink()
+    smoke_report = assess_readiness(request, root, checkpoint_path.parent)
+    assert smoke_report["runtime_compatibility"]["status"] == "complete"
+    assert {item["campaign"] for item in smoke_report["selected_cells"]} == {"smoke"}
+
+    formal.pop("runtime_observations")
+    if not formal_has_cells:
+        formal["cells"] = {}
+    _write(checkpoint_path, formal)
+    report = assess_readiness(request, root, checkpoint_path.parent)
+
+    assert not report["ready_for_full_collection"]
+    if formal_has_cells:
+        assert report["runtime_compatibility"] is None
+        assert "collector checkpoint records no runtime observation index" in " ".join(report["blockers"])
+    else:
+        assert report["runtime_compatibility"]["status"] == "complete"
+        assert not any("runtime memory:" in reason for reason in report["blockers"])
+    assert {item["campaign"] for item in report["selected_cells"]} == {"formal" if formal_has_cells else "smoke"}
+    assert all(len(campaign["cells"]) == 2 for campaign in report["campaigns"])
+    assert {item["cell"]["workload_kind"] for item in report["selected_cells"]} == {"prefill", "decode"}
+
+
+@pytest.mark.parametrize("path_kind", ["relative", "symlinked_directory"])
+def test_explicit_bindings_resolve_checkpoint_index_paths(split_collection, tmp_path, monkeypatch, path_kind):
+    request, bindings = split_collection
+    _review(request, bindings)
+    for binding in bindings:
+        checkpoint_path = Path(binding["checkpoint"]["path"])
+        checkpoint = json.loads(checkpoint_path.read_text())
+        if path_kind == "relative":
+            checkpoint["runtime_observations"] = str(
+                Path(checkpoint["runtime_observations"]).relative_to(checkpoint_path.parent)
+            )
+            _write(checkpoint_path, checkpoint)
+            binding["checkpoint"] = _ref(checkpoint_path)
+        else:
+            alias = tmp_path / (binding["phase"] + "-alias")
+            alias.symlink_to(checkpoint_path.parent, target_is_directory=True)
+            for field in ("plan", "checkpoint", "observations"):
+                original = Path(binding[field]["path"])
+                binding[field]["path"] = str(alias / original.relative_to(checkpoint_path.parent))
+    elsewhere = tmp_path / "unrelated-working-directory"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = runtime.verify_collection_runtime_bindings(request, bindings)
+
+    assert result["status"] == "complete"
+    assert set(result["phases"]) == {"prefill", "decode"}
+
+
+@pytest.mark.parametrize("change", ["mismatch", "escape", "symlink_escape", "symlink_file", "hash"])
+def test_runtime_index_path_resolution_preserves_binding_checks(split_collection, tmp_path, change):
+    request, bindings = split_collection
+    _review(request, bindings)
+    binding = bindings[0]
+    checkpoint_path = Path(binding["checkpoint"]["path"])
+    checkpoint = json.loads(checkpoint_path.read_text())
+    index = Path(binding["observations"]["path"])
+    if change == "mismatch":
+        another = index.with_name("another-index.json")
+        another.write_bytes(index.read_bytes())
+        checkpoint["runtime_observations"] = str(another)
+        expected = "runtime checkpoint does not match"
+    elif change in {"escape", "symlink_escape"}:
+        outside = tmp_path / "outside-collection"
+        outside.mkdir()
+        (outside / index.name).write_bytes(index.read_bytes())
+        if change == "symlink_escape":
+            alias = checkpoint_path.parent / "escaped-observations"
+            alias.symlink_to(outside, target_is_directory=True)
+            outside = alias
+        binding["observations"] = _ref(outside / index.name)
+        checkpoint["runtime_observations"] = str(outside / index.name)
+        expected = "index escapes the frozen collection directory"
+    elif change == "symlink_file":
+        alias = index.with_name("symlink-index.json")
+        alias.symlink_to(index)
+        checkpoint["runtime_observations"] = str(alias)
+        expected = "runtime observation index must be a regular file"
+    else:
+        binding["observations"]["sha256"] = "0" * 64
+        expected = "bound artifact hash mismatch"
+    _write(checkpoint_path, checkpoint)
+    binding["checkpoint"] = _ref(checkpoint_path)
+
+    with pytest.raises(ValueError, match=expected):
+        runtime.verify_collection_runtime_bindings(request, bindings)
