@@ -25,11 +25,12 @@
 //! request takes its share of that payload with it while the device work stays
 //! charged.
 //!
-//! The scheduler thread itself is modeled as free: request preparation is
-//! priced in the frontend stages ahead of the inbox, and batch selection,
-//! kernel launch, and result processing are not charged. With a free thread a
-//! DECODE launch, which synchronizes with the previous forward before its
-//! kernels start, and an EXTEND launch, which does not, produce the same
+//! The scheduler thread itself is modeled as free: image load and
+//! preprocessing are priced in the frontend stages ahead of the inbox; the
+//! tokenizer-manager send, the scheduler's receive preparation, batch
+//! selection, kernel launch and result processing are not charged. With a free
+//! thread a DECODE launch, which synchronizes with the previous forward before
+//! its kernels start, and an EXTEND launch, which does not, produce the same
 //! timeline, and the observation of a forward lands where that forward ends.
 
 use std::collections::VecDeque;

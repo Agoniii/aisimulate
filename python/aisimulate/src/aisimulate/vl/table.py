@@ -4,7 +4,7 @@
 """Host cost table: frontend stages measured on one serving environment.
 
 One table holds every row collected on a serving host. Rows are keyed by model
-and by the frontend, feature transport and image workload they were measured on;
+and by the frontend and image workload they were measured on;
 `predict` and `recommend` look a row up exactly and a missing row fails closed
 with the collect command that measures it. Rows are measured data: nothing here
 interpolates or defaults a cost.
@@ -61,7 +61,7 @@ class FrontendRow(StrictModel):
 
 
 class HostCostTable(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     environment: TableEnvironment
     rows: list[FrontendRow] = Field(default_factory=list)
 
@@ -82,8 +82,10 @@ class MissingRow(ValueError):
 def load_table(path: str | Path) -> HostCostTable:
     try:
         return HostCostTable.model_validate(json.loads(Path(path).read_text()))
-    except OSError as exc:
-        raise ValueError(f"could not read host cost table {path}: {exc}") from exc
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            f"host cost table {path} is not a valid schema-2 table ({exc}); re-collect it with this release"
+        ) from exc
 
 
 def save_table(path: str | Path, table: HostCostTable) -> None:
@@ -136,8 +138,6 @@ def collect_command(path: str | Path, measurement: FrontendMeasurementConfig) ->
         "--encoding",
         measurement.encoding,
     ]
-    if measurement.frontend == "rust":
-        parts += ["--tp", "1" if measurement.feature_transport == "inline" else "2"]
     for name, value in (("--min-pixels", measurement.min_pixels), ("--max-pixels", measurement.max_pixels)):
         if value is not None:
             parts += [name, str(value)]
@@ -162,10 +162,10 @@ def lookup(table: HostCostTable, path: str | Path, measurement: FrontendMeasurem
 
 
 def resolve_frontend(
-    config: HostProfileConfig, *, model: str, images: Mapping[str, Any], tensor: int
+    config: HostProfileConfig, *, model: str, images: Mapping[str, Any]
 ) -> tuple[FrontendPredictionConfig, str]:
-    """The frontend stages a prediction of `model` over `images` on `tensor` ranks runs with, and their row's digest."""
-    measurement = FrontendMeasurementConfig.for_workload(model, config.frontend, images, tensor)
+    """The frontend stages a prediction of `model` over `images` runs with, and their row's digest."""
+    measurement = FrontendMeasurementConfig.for_workload(model, config.frontend, images)
     if not Path(config.path).exists():
         # The first prediction on a new serving host: the table is created by its first collection.
         raise MissingRow(

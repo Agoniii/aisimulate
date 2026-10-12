@@ -169,7 +169,7 @@ def _native_encoder_rows(encoder, *, model_name, system, backend, version, datab
 
     (cap,) = encoder.batch_size
     profile = HostProfileConfig.model_validate(encoder.host_profile)
-    frontend, digest = resolve_frontend(profile, model=model_name, images=images.model_dump(mode="json"), tensor=1)
+    frontend, digest = resolve_frontend(profile, model=model_name, images=images.model_dump(mode="json"))
     rows = []
     rejected = []
     for tp in encoder.tp:

@@ -1929,7 +1929,6 @@ fn synthetic_turn_images(
             token_start,
             token_end: token_start + images.visual_tokens,
             encoder: images.encoder,
-            feature_bytes: images.feature_bytes,
             embedding_bytes: images.embedding_bytes,
         });
         token_start += images.visual_tokens;

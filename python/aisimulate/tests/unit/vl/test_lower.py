@@ -38,26 +38,24 @@ def test_stage_costs_take_the_alone_service_and_scale_by_sharing():
         stage_costs(curves, capacity=2)
 
 
-def test_recordings_lower_to_each_frontends_stages():
+def test_recordings_lower_to_one_process_stage_per_frontend():
     levels = {"1": _level(1, 20.0), "2": _level(2, 24.0)}
     python = frontend_row(
         {
             "frontend": "python",
             "workers": 2,
             "levels": levels,
-            "send_ms": 3.5,
-            "receive_ms": 7.25,
             "environment": ENVIRONMENT,
             "provenance": {"text_tokens": 128},
         },
-        FrontendMeasurementConfig(model="m", frontend="python", feature_transport="shm", height=480, width=480),
+        FrontendMeasurementConfig(model="m", frontend="python", height=480, width=480),
     )
-    assert [(s.workers, s.service_ms) for s in python.stages] == [(2, pytest.approx(20.0)), (1, 3.5), (1, 7.25)]
+    assert [(s.workers, s.service_ms) for s in python.stages] == [(2, pytest.approx(20.0))]
     assert python.stages[0].concurrency_scale == pytest.approx([1.0, 1.2])
     assert python.provenance == {"text_tokens": 128}
     rust = frontend_row(
-        {"frontend": "rust", "workers": 2, "levels": levels, "receive_ms": 0.3, "environment": ENVIRONMENT},
-        FrontendMeasurementConfig(model="m", frontend="rust", feature_transport="inline", height=480, width=480),
+        {"frontend": "rust", "workers": 2, "levels": levels, "environment": ENVIRONMENT},
+        FrontendMeasurementConfig(model="m", frontend="rust", height=480, width=480),
     )
-    assert [(s.workers, s.service_ms) for s in rust.stages] == [(2, pytest.approx(20.0)), (1, 0.3)]
+    assert [(s.workers, s.service_ms) for s in rust.stages] == [(2, pytest.approx(20.0))]
     assert environment({"environment": ENVIRONMENT}).cpu == "c"

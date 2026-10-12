@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from ...config.common import load_yaml
-from ...config.engine import FrontendMeasurementConfig, feature_transport
+from ...config.engine import FrontendMeasurementConfig
 from ..table import SGLANG_VERSION, load_table, update_table
 from .lower import STAGE_LABELS, environment, frontend_row
 
@@ -43,10 +43,9 @@ def _show(path: Path) -> int:
     env = table.environment
     print(f"{path}: {env.cpu}, sglang {env.sglang_version}, python {env.python}")
     for row in table.rows:
-        labels = STAGE_LABELS[row.measured_for.frontend]
         stages = ", ".join(
             f"{label}({stage.workers}) {stage.service_ms:.2f} ms"
-            for label, stage in zip(labels, row.stages, strict=True)
+            for label, stage in zip(STAGE_LABELS, row.stages, strict=True)
         )
         print(f"  {row.measured_for.describe():70s} | {stages} | {table.digest(row)}")
     return 0
@@ -67,11 +66,10 @@ def _from_config(args: argparse.Namespace, parser: argparse.ArgumentParser) -> N
         parser.error(f"{args.config} has no language worker with an image workload")
     encoder = workers.get("encoder") or {}
     if not worker.get("host_profile") and encoder.get("host_profile"):
-        worker = {"host_profile": encoder["host_profile"], "parallelism": {"tensor": 1}}
+        worker = {"host_profile": encoder["host_profile"]}
     profile = worker.get("host_profile") or {}
     if not profile and (args.table is None or args.frontend is None):
         parser.error(f"{args.config} has no host_profile; pass --table and --frontend explicitly")
-    tensor = (worker.get("parallelism") or {}).get("tensor", 1)
     defaults = {
         "table": profile.get("path"),
         "model": raw.get("engine", {}).get("model"),
@@ -80,13 +78,10 @@ def _from_config(args: argparse.Namespace, parser: argparse.ArgumentParser) -> N
         "encoding": images.get("encoding", "png"),
         "min_pixels": images.get("min_pixels"),
         "max_pixels": images.get("max_pixels"),
-        "tp": tensor if isinstance(tensor, int) else None,
     }
     for name, value in defaults.items():
         if getattr(args, name) is None:
             setattr(args, name, value)
-    if args.tp is None:
-        parser.error(f"{args.config} searches parallelism.tensor; pass --tp for the width to measure")
 
 
 def _check_sglang(python: str) -> None:
@@ -108,7 +103,6 @@ def main(argv=None) -> int:
     parser.add_argument("--show", action="store_true", help="print the table's rows and exit")
     parser.add_argument("--model", help="model identifier as written in engine.model")
     parser.add_argument("--frontend", choices=("python", "rust"))
-    parser.add_argument("--tp", type=int, help="tensor-parallel width the frontend serves (Rust: inline below 2)")
     parser.add_argument("--images", type=_images, metavar="HxW[xN]")
     parser.add_argument("--encoding", choices=("png", "jpeg"))
     parser.add_argument("--min-pixels", type=int, help="processor rescale floor; default: the checkpoint's")
@@ -127,12 +121,10 @@ def main(argv=None) -> int:
         if getattr(args, name) is None:
             parser.error(f"--{name} is required")
     encoding = args.encoding or "png"
-    tp = args.tp or 1
     height, width, count = args.images
     measurement = FrontendMeasurementConfig(
         model=args.model,
         frontend=args.frontend,
-        feature_transport=feature_transport(args.frontend, tp),
         height=height,
         width=width,
         count=count,
@@ -160,9 +152,9 @@ def main(argv=None) -> int:
         failed.write_text(json.dumps(recording, indent=1))
         raise SystemExit(f"{exc}\nThe raw recording was kept at {failed}; lower it again with --recording") from exc
     table = update_table(path, environment(recording), row)
-    labels = STAGE_LABELS[args.frontend]
     stages = "; ".join(
-        f"{label}({stage.workers}) {stage.service_ms:.2f} ms" for label, stage in zip(labels, row.stages, strict=True)
+        f"{label}({stage.workers}) {stage.service_ms:.2f} ms"
+        for label, stage in zip(STAGE_LABELS, row.stages, strict=True)
     )
     print(f"{path}: {measurement.describe()} -> {stages} [{table.digest(row)}]")
     return 0
@@ -188,8 +180,6 @@ def _measure(args: argparse.Namespace, measurement: FrontendMeasurementConfig) -
         measurement.encoding,
         "--text-tokens",
         str(args.text_tokens),
-        "--tp",
-        str(args.tp or 1),
     ]
     for name, value in (("--min-pixels", measurement.min_pixels), ("--max-pixels", measurement.max_pixels)):
         if value is not None:

@@ -392,25 +392,13 @@ class FrontendStageConfig(StrictModel):
 
 
 FrontendKind = Literal["python", "rust"]
-FeatureTransport = Literal["inline", "shm"]
-
-
-def feature_transport(frontend: FrontendKind, tensor: int) -> FeatureTransport:
-    """How SGLang 0.5.19 hands image features to the scheduler.
-
-    The Python tokenizer manager always parks them in POSIX shared memory; the
-    Rust multimodal workers keep them inline on a single rank and switch to shared
-    memory once the request is broadcast across tensor-parallel ranks.
-    """
-    return "shm" if frontend == "python" or tensor > 1 else "inline"
 
 
 class FrontendMeasurementConfig(StrictModel):
-    """The model, frontend, feature transport and image workload a set of stages was measured on."""
+    """The model, frontend and image workload a set of stages was measured on."""
 
     model: str = Field(min_length=1)
     frontend: FrontendKind
-    feature_transport: FeatureTransport
     height: PositiveInt
     width: PositiveInt
     count: PositiveInt = 1
@@ -419,14 +407,11 @@ class FrontendMeasurementConfig(StrictModel):
     max_pixels: PositiveInt | None = None
 
     @classmethod
-    def for_workload(
-        cls, model: str, frontend: FrontendKind, images: Mapping[str, Any], tensor: int
-    ) -> FrontendMeasurementConfig:
-        """The measurement a prediction of `model` over `images` on `tensor` ranks needs."""
+    def for_workload(cls, model: str, frontend: FrontendKind, images: Mapping[str, Any]) -> FrontendMeasurementConfig:
+        """The measurement a prediction of `model` over `images` needs."""
         return cls(
             model=model,
             frontend=frontend,
-            feature_transport=feature_transport(frontend, tensor),
             height=int(images["height"]),
             width=int(images["width"]),
             count=int(images.get("count", 1)),
@@ -441,10 +426,7 @@ class FrontendMeasurementConfig(StrictModel):
             for name, value in (("min_pixels", self.min_pixels), ("max_pixels", self.max_pixels))
             if value is not None
         )
-        return (
-            f"{self.model} {self.frontend} {self.feature_transport} "
-            f"{self.height}x{self.width}x{self.count} {self.encoding}{pixels}"
-        )
+        return f"{self.model} {self.frontend} {self.height}x{self.width}x{self.count} {self.encoding}{pixels}"
 
 
 class FrontendPredictionConfig(StrictModel):
@@ -453,7 +435,7 @@ class FrontendPredictionConfig(StrictModel):
     stages: list[FrontendStageConfig] = Field(min_length=1)
     measured_for: FrontendMeasurementConfig | None = Field(
         default=None,
-        description="Workload the stages were measured on; a prediction of another shape or transport is refused.",
+        description="Workload the stages were measured on; a prediction of another shape is refused.",
     )
 
 

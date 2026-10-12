@@ -50,39 +50,40 @@ The field tables are on [Workers](workers.md#sglang-host-loop-frontend-and-visio
 [workloads](../workloads.md#traffic-fields) (`traffic.source.images`); the
 reported keys are in the [CLI reference](../../reference/cli.md#standard-output).
 
-The only CPU costs the model carries are the frontend stages a request crosses
-before the scheduler admits it, measured as black boxes at request level on the
-real SGLang objects. Each stage is a pool of `workers` with a `service_ms` for one
-request running alone and a `concurrency_scale` that reprices it while several
-requests share the pool. The Python frontend is three stages: `process`, the
-multimodal processor path (image decode, Hugging Face processor, layout) as a
-pool the width of its IO executor; `send`, the tokenizer-manager loop's
-synchronous shared-memory wrap and msgpack encode, one worker; and `receive`, the
-scheduler's per-request preparation (shared-memory materialization, feature
-hashing, placeholder padding), one worker. The Rust frontend is `process`, the
-multimodal worker pool timed from the HTTP send to the scheduler-side drain,
-followed by `receive`. The single-worker stages serialize requests but do not
-stall the dispatch of arrivals as the real loop thread does; on the measured
-serving host that moved TTFT by at most a few percent at eight concurrent requests.
+The only CPU cost the model carries is the frontend stage a request crosses
+before the scheduler admits it. Each frontend is one measured stage, `process`:
+the multimodal processor path (image decode, Hugging Face processor, layout),
+measured as a request-level black box on the real SGLang objects. The stage is
+a pool of `workers` with a `service_ms` for one request running alone and a
+`concurrency_scale` that reprices it while several requests share the pool. The
+Python frontend is SGLang's default HTTP server with its `TokenizerManager`;
+the Rust frontend is the embedded Rust server's multimodal workers, measured
+single-rank.
+
+Not priced between the frontend and the scheduler: the request's serialization
+and the tokenizer manager's send, the scheduler's per-request receive
+preparation (shared-memory materialization, `MultimodalInputs` assembly,
+placeholder padding) and, on the Rust frontend above tensor-parallel width one,
+the shared-memory feature hand-off. The omission grows with the number and size
+of the images in a request and is largest for the Rust frontend above
+tensor-parallel width one. Pricing these steps as stages of their own is
+warranted when the frontend-attributable TTFT error at the target concurrency
+is material, or for multi-image and very large image workloads.
 
 A host cost table belongs to one serving environment (CPU model, sglang
-release, Python) and holds one row per measurement: model, frontend, feature
-transport, and image shape (height, width, count, encoding, processor pixel
-budget). The host name, thread count and sampling time of each collection stay in
-the row's provenance. The feature transport follows sglang on one node: the
-Python tokenizer manager always parks image features in POSIX shared memory, the
-Rust workers keep them inline on a single rank and use shared memory once the
-request is broadcast across tensor-parallel ranks, so a Rust table needs a row
-per transport the tensor-parallel candidates use (`collect --tp`). A prediction
-whose workload has no row fails closed and prints the `collect` command that adds
-it; a failed lowering keeps the raw recording next to the table, and
-`collect --recording` lowers it again. The stages a prediction or candidate runs
-with carry the measurement they came from (`frontend.measured_for`), so a saved
-recommendation refuses to price another model, image shape or transport with
-stale constants, and the row's content digest travels in the prediction
-metadata. Explicit `frontend.stages` remain available for hand-written tables
-and tests. Text length is recorded with the row but not part of its key: on the
-measured grid it moved the frontend stages by under one percent.
+release, Python) and holds one row per measurement: model, frontend and image
+shape (height, width, count, encoding, processor pixel budget). The host name,
+thread count and sampling time of each collection stay in the row's provenance.
+A prediction whose workload has no row fails closed and prints the `collect`
+command that adds it; a failed lowering keeps the raw recording next to the
+table, and `collect --recording` lowers it again. The stage a prediction or
+candidate runs with carries the measurement it came from
+(`frontend.measured_for`), so a saved recommendation refuses to price another
+model or image shape with stale constants, and the row's content digest travels
+in the prediction metadata. Explicit `frontend.stages` remain available for
+hand-written tables and tests. Text length is recorded with the row but not
+part of its key; its effect on the frontend stage was negligible on the
+measured grid.
 
 Lower-level Runner specifications set `rank.sglang.host_loop: true`,
 `rank.sglang.vlm_cache_bytes`, `rank.frontend`, and `rank.vision: true`; Rust
@@ -144,7 +145,7 @@ that budget for a served processor whose limits differ. Repeated images
 entirely, as it does upstream.
 
 Reports add the mean time to first token split by milestone: `mean_frontend_ms`
-(arrival to leaving the frontend stages, receive preparation included),
+(arrival to leaving the frontend stages),
 `mean_scheduler_inbox_wait_ms` (frontend exit to the scheduler draining the
 request), `mean_receive_to_admit_ms` (received to selected, the waiting-queue
 time when the batch budget is full), `mean_prefill_elapsed_ms` (selected to the
@@ -256,30 +257,18 @@ frontend stages; a search over TP and replicas on one shared node has no common
 CPU budget in this model.
 
 Omitted CPU costs, by decision: the scheduler thread's batch-level work is not
-priced. On a measured Qwen3-VL-8B serving host (SGLang 0.5.19, image shapes
-480²-1024² × 1-16 images, text 128) the omitted terms were small next to
-`receive`, which is kept as a frontend stage: pixel-value host-to-device copies
-before the encoder about 2% of TTFT for the largest image batches, the eager
-language-model kernel launch (about 37 ms per prefill batch) exposed only when
-a prompt's forward is shorter than that (below roughly 300 tokens), the decode
-step launch about 2 ms per step, and selection plus result processing about
-1 ms per iteration. Keeping `receive` as a frontend stage rather than on the
-scheduler thread means received requests are admitted as they finish preparing
-instead of as one drained group; on the same grid the two placements agreed
-within the measurement noise. Predictions are therefore optimistic for very
-short prompts, for decode-step latency at small batch sizes, and for
-tensor-parallel scheduler synchronization, which is not measured. HTTP parsing
-and chat templating in the Python server are outside the measured stages
-(3-10 ms per MB of request body); the Rust stage includes its HTTP receive and
-tokenization, and the Rust `process` stage starts at the client's JSON encoding
-of the request body. The collector measures the CPU image path only and must not
-run next to a serving process on the same host; it times `receive` with torch's
-intra-op pool at one thread, as the scheduler process runs it (`ModelRunner.load_model`),
-since the default pool on the two cores the Rust server leaves the scheduler
-turns a 25 MB shared-memory clone from about 12 ms into hundreds. `receive` runs
-the placeholder padding pattern Qwen3-VL and Llama 4 use
-(`MultiModalityDataPaddingPatternMultimodalTokens`); other VL families may pad
-differently and have not been measured.
+priced, nor is the frontend-to-scheduler hand-off above. The remaining omitted
+terms are the pixel-value host-to-device copies before the encoder, the eager
+language-model kernel launch, exposed only when a prompt's forward is shorter
+than the launch itself, the decode-step launch the overlap loop runs between
+prefills, and batch selection with result processing. Predictions are
+therefore optimistic for very short prompts, for decode-step latency at small
+batch sizes, and for tensor-parallel scheduler synchronization, which is not
+measured. HTTP parsing and chat templating in the Python server are outside the
+measured stage; the Rust stage includes its HTTP receive and tokenization, and
+the Rust `process` stage starts at the client's JSON encoding of the request
+body. The collector measures the CPU image path only and must not run next to
+a serving process on the same host.
 
 Support matrix: the mechanics are exercised end to end for Qwen3-VL on the
 packaged `h200_sxm` SGLang data with hand-written stages; the collector's Python
@@ -307,8 +296,7 @@ immutable revision `0bcd822377da7b5718e674eaf9c870d349424dd1`:
   and the [multimodal embedding cache](https://github.com/sgl-project/sglang/blob/0bcd822377da7b5718e674eaf9c870d349424dd1/python/sglang/srt/mem_cache/multimodal_cache.py)
 - [Tokenizer manager](https://github.com/sgl-project/sglang/blob/0bcd822377da7b5718e674eaf9c870d349424dd1/python/sglang/srt/managers/tokenizer_manager.py),
   [multimodal processors](https://github.com/sgl-project/sglang/blob/0bcd822377da7b5718e674eaf9c870d349424dd1/python/sglang/srt/multimodal/processors/base_processor.py),
-  and the [Rust multimodal workers' feature transport](https://github.com/sgl-project/sglang/blob/0bcd822377da7b5718e674eaf9c870d349424dd1/python/sglang/srt/rust_server/multimodal.py)
-  (`_use_feature_shm`)
+  and [the Rust multimodal workers](https://github.com/sgl-project/sglang/blob/0bcd822377da7b5718e674eaf9c870d349424dd1/python/sglang/srt/rust_server/multimodal.py)
 
 No upstream source or tests are copied;
 [`THIRD_PARTY_NOTICES.md`](../../../THIRD_PARTY_NOTICES.md) records the

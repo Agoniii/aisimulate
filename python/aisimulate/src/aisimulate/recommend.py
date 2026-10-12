@@ -515,11 +515,11 @@ def _native_vl_search_space(config: CoreRecommendationConfig, workers: dict[str,
     """Pinned host, frontend and vision settings shared by every host-aware candidate.
 
     Frontend stages are measured data, not search dimensions. A host cost table
-    is resolved here once per feature transport the tensor-parallel candidates
-    need, so candidates score rows that matched the workload shape and never a
-    file that may change later; only the vision tower needs an image workload.
-    The aggregated or the prefill worker hosts the loop, keyed by its legacy role.
-    A native encoder pool leaves the loop on the language worker and takes the tower.
+    is resolved here once per role, so candidates score the row that matched the
+    workload shape and never a file that may change later; only the vision tower
+    needs an image workload. The aggregated or the prefill worker hosts the loop,
+    keyed by its legacy role. A native encoder pool leaves the loop on the
+    language worker and takes the tower.
     """
     encoder = config.engine.workers.encoder
     if encoder is not None and encoder.mode == "analytical":
@@ -544,24 +544,13 @@ def _native_vl_search_space(config: CoreRecommendationConfig, workers: dict[str,
             continue
         if images is None:
             raise ValueError("host_profile requires an image workload")
-        from .config.engine import feature_transport
         from .vl.table import resolve_frontend
 
-        # The transport only depends on whether a candidate runs on one rank, so the
-        # domain's members (a log range contributes its bounds) decide which rows exist.
-        tensors, log_range = _integer_domain((raw.get("parallelism") or {}).get("tensor"), default=[1, 2, 4, 8])
-        tensors = set(tensors) | set(log_range or ())
-        by_tensor = {feature_transport(worker.host_profile.frontend, tensor): tensor for tensor in sorted(tensors)}
-        by_transport: dict[str, Any] = {}
-        for transport, tensor in sorted(by_tensor.items()):
-            frontend, digest = resolve_frontend(
-                worker.host_profile,
-                model=config.engine.model,
-                images=images.model_dump(mode="json"),
-                tensor=tensor,
-            )
-            by_transport[transport] = {"frontend": frontend.model_dump(mode="json"), "digest": digest}
-        result[f"{role}_frontend_by_transport"] = by_transport
+        frontend, digest = resolve_frontend(
+            worker.host_profile, model=config.engine.model, images=images.model_dump(mode="json")
+        )
+        result[f"{role}_frontend"] = frontend.model_dump(mode="json")
+        result[f"{role}_host_profile_digest"] = digest
     return result
 
 
@@ -1068,13 +1057,11 @@ def _candidate_prediction(
         if deployment.deployment_mode == "disagg" and raw_worker.get("hardware") is not None:
             engine["workers"][public_role]["hardware"] = sample[f"{role}_hardware_sku"]
         if role in ("agg", "prefill"):
-            from .sweeper.deploy import sample_frontend
-
             rendered = engine["workers"][public_role]
             # The stages are written out as the candidate ran them, with the workload
             # they were measured for: a saved candidate must not depend on a table
             # file that can change or disappear after scoring.
-            frontend = sample_frontend(sample, role)
+            frontend = sample.get(f"{role}_frontend")
             if frontend is not None:
                 rendered["frontend"] = deepcopy(frontend)
             elif sample.get(f"{role}_host_loop"):

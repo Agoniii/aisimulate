@@ -90,7 +90,6 @@ fn submitted_requests_keep_their_image_placeholders() {
                 transformer_tokens: 12,
                 output_tokens: 3,
             },
-            feature_bytes: 96,
             embedding_bytes: 128,
         },
         ImageSpec {
@@ -103,7 +102,6 @@ fn submitted_requests_keep_their_image_placeholders() {
                 transformer_tokens: 12,
                 output_tokens: 3,
             },
-            feature_bytes: 96,
             embedding_bytes: 128,
         },
     ];
@@ -132,7 +130,6 @@ fn rejects_image_placeholders_outside_the_prompt(#[values((6, 3), (6, 9))] span:
             transformer_tokens: 12,
             output_tokens: 3,
         },
-        feature_bytes: 96,
         embedding_bytes: 128,
     }];
     assert!(
@@ -4004,7 +4001,6 @@ mod vision_batches {
                 transformer_tokens: 16,
                 output_tokens: 4,
             },
-            feature_bytes: 1_000,
             embedding_bytes: 4_000,
         }
     }

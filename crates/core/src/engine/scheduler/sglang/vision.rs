@@ -128,7 +128,6 @@ mod tests {
                 transformer_tokens: 16,
                 output_tokens: 4,
             },
-            feature_bytes: 0,
             embedding_bytes: bytes,
         }
     }

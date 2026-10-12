@@ -30,15 +30,13 @@ pub struct EncoderShape {
 /// `token_start..token_end` is the half-open placeholder interval inside the
 /// prompt; its length is the image's visual token count. `identity` keys the
 /// vision embedding cache and repeats only when the workload reuses an image.
-/// `feature_bytes` is the processor output moved through host memory and
-/// `embedding_bytes` the encoder output retained by the embedding cache.
+/// `embedding_bytes` is the encoder output retained by the embedding cache.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageSpec {
     pub identity: u64,
     pub token_start: usize,
     pub token_end: usize,
     pub encoder: EncoderShape,
-    pub feature_bytes: u64,
     pub embedding_bytes: u64,
 }
 

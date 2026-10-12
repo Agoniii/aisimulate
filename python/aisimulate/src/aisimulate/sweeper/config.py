@@ -652,14 +652,14 @@ class SearchSpace(BaseModel):
     # Host-aware SGLang VL replay: pinned settings lowered from the public configuration.
     agg_host_loop: bool | None = None
     agg_frontend: dict[str, Any] | None = None
-    # Measured rows by feature transport (`inline` for TP1 Rust frontends, `shm` otherwise),
-    # each `{"frontend": ..., "digest": ...}`; a candidate takes the row its TP needs.
-    agg_frontend_by_transport: dict[str, Any] | None = None
+    # Content digest of the host-table row agg_frontend was resolved from.
+    agg_host_profile_digest: str | None = None
     agg_vision: dict[str, Any] | None = None
     # The prefill worker hosts the same loop in disaggregated deployments.
     prefill_host_loop: bool | None = None
     prefill_frontend: dict[str, Any] | None = None
-    prefill_frontend_by_transport: dict[str, Any] | None = None
+    # Content digest of the host-table row prefill_frontend was resolved from.
+    prefill_host_profile_digest: str | None = None
     prefill_vision: dict[str, Any] | None = None
     kv_transfer_bytes_per_token: int | str | None = None
     kv_transfer_bandwidth: float | None = None

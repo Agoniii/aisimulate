@@ -448,7 +448,6 @@ pub struct SyntheticImages {
     pub visual_tokens: usize,
     /// Encoder sequences and per-sequence token counts behind each image.
     pub encoder: crate::engine::EncoderShape,
-    pub feature_bytes: u64,
     pub embedding_bytes: u64,
     /// Reuse identities round-robin over this many distinct images; `None`
     /// gives every image a fresh identity so no request shares one.

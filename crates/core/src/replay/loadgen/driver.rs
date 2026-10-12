@@ -3649,7 +3649,6 @@ mod tests {
                             transformer_tokens: 4,
                             output_tokens: 1,
                         },
-                        feature_bytes: 1,
                         embedding_bytes: 1,
                     }],
                 }],

@@ -101,8 +101,6 @@ struct RuntimeTraffic {
     #[serde(default)]
     image_output_tokens: Option<u32>,
     #[serde(default)]
-    image_feature_bytes: Option<u64>,
-    #[serde(default)]
     image_embedding_bytes: Option<u64>,
     #[serde(default)]
     image_identity_pool: Option<u64>,
@@ -1559,9 +1557,6 @@ fn synthetic_images(traffic: &RuntimeTraffic) -> Result<Option<SyntheticImages>>
                 .image_output_tokens
                 .context("image traffic requires image_output_tokens")?,
         },
-        feature_bytes: traffic
-            .image_feature_bytes
-            .context("image traffic requires image_feature_bytes")?,
         embedding_bytes: traffic
             .image_embedding_bytes
             .context("image traffic requires image_embedding_bytes")?,

@@ -219,34 +219,12 @@ def _profile_kv_args(sample: dict[str, Any], role: str, backend_version: str) ->
     }
 
 
-def _frontend_row(sample: dict[str, Any], role: str) -> dict[str, Any] | None:
-    """The measured table row a candidate's tensor-parallel width selects for `role`, if it uses one."""
-    by_transport = sample.get(f"{role}_frontend_by_transport")
-    if not by_transport:
-        return None
-    from ..config.engine import feature_transport
-
-    tp = int(sample[f"{_role_prefix(role)}tp"])
-    frontend_kind = next(iter(by_transport.values()))["frontend"]["measured_for"]["frontend"]
-    transport = feature_transport(frontend_kind, tp)
-    try:
-        return by_transport[transport]
-    except KeyError:
-        raise ValueError(f"no frontend stages were resolved for feature transport {transport} (tp={tp})") from None
-
-
-def sample_frontend(sample: dict[str, Any], role: str) -> dict[str, Any] | None:
-    """The frontend stages a candidate's `role` runs with: its transport's measured row, or the explicit stages."""
-    row = _frontend_row(sample, role)
-    return row["frontend"] if row is not None else sample.get(f"{role}_frontend")
-
-
 def _native_vl_engine_args(sample: dict[str, Any], role: str) -> dict[str, Any]:
     """The compiler's SGLang host-aware lowering for a sweeper candidate's `role`."""
     from ..compiler import sglang_host_engine_args
     from ..config.engine import FrontendPredictionConfig, VisionPredictionConfig
 
-    frontend = sample_frontend(sample, role)
+    frontend = sample.get(f"{role}_frontend")
     vision = sample.get(f"{role}_vision")
     return sglang_host_engine_args(
         host_loop=bool(sample.get(f"{role}_host_loop")),
@@ -363,11 +341,11 @@ def build_backend_deployment(
             "selection": deepcopy(estimator.diagnostics),
         }
     host_role = "agg" if mode == "agg" else "prefill"
-    row = _frontend_row(sample, host_role)
-    if row is not None:
+    digest = sample.get(f"{host_role}_host_profile_digest")
+    if digest is not None:
         common["performance_model_metadata"]["aggregated" if mode == "agg" else "prefill"]["vl"] = {
-            "host_profile_digest": row["digest"],
-            "frontend": row["frontend"]["measured_for"]["frontend"],
+            "host_profile_digest": digest,
+            "frontend": sample[f"{host_role}_frontend"]["measured_for"]["frontend"],
         }
     if encoder is not None and encoder.native is not None:
         from ..config.epd import encoder_metadata

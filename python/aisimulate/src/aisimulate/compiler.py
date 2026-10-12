@@ -550,9 +550,7 @@ def _resolve_host_profile(
     images = workload.get("images")
     if not isinstance(images, dict):
         raise ValueError("host_profile requires an image workload")
-    frontend, digest = resolve_frontend(
-        worker.host_profile, model=engine.model, images=images, tensor=worker.parallelism.tensor
-    )
+    frontend, digest = resolve_frontend(worker.host_profile, model=engine.model, images=images)
     resolved = worker.model_copy(update={"frontend": frontend, "host_profile": None})
     return resolved, {"vl": {"host_profile_digest": digest, "frontend": worker.host_profile.frontend}}
 
@@ -560,14 +558,14 @@ def _resolve_host_profile(
 def _check_frontend_measurement(
     engine: EnginePredictionConfig, worker: HostWorkerPredictionConfig, workload: dict[str, JSONValue]
 ) -> None:
-    """Stages measured on one model, workload and feature transport price only that combination."""
+    """Stages measured on one model and workload price only that combination."""
     measured = worker.frontend.measured_for if worker.frontend is not None else None
     if measured is None:
         return
     images = workload.get("images")
     if not isinstance(images, dict):
         raise ValueError(f"frontend stages were measured for {measured.describe()}; this workload has no images")
-    needed = FrontendMeasurementConfig.for_workload(engine.model, measured.frontend, images, worker.parallelism.tensor)
+    needed = FrontendMeasurementConfig.for_workload(engine.model, measured.frontend, images)
     if needed != measured:
         raise ValueError(
             f"frontend stages were measured for {measured.describe()}; this prediction needs {needed.describe()}"

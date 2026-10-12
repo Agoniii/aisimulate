@@ -1239,7 +1239,6 @@ def _image_traffic_fields(deployment: BackendDeploymentSpec, images: Mapping[str
         "image_patch_tokens": geometry.patch_tokens,
         "image_transformer_tokens": geometry.transformer_tokens,
         "image_output_tokens": geometry.output_tokens,
-        "image_feature_bytes": geometry.feature_bytes,
         "image_embedding_bytes": geometry.embedding_bytes,
     }
     identity = images.get("identity", "unique")

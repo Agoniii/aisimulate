@@ -32,21 +32,17 @@ def environment(recording: dict[str, Any]) -> TableEnvironment:
 
 
 def frontend_row(recording: dict[str, Any], measurement: FrontendMeasurementConfig) -> FrontendRow:
-    """Stages of one frontend from the worker script's recording.
+    """The one stage of a frontend from the worker script's recording.
 
-    Python: the multimodal processor path (image decode, HF processor, layout)
-    as a pool the width of its IO executor, the tokenizer-manager loop's
-    synchronous send as one worker, and the scheduler's per-request receive
-    preparation as one worker. Rust: the multimodal worker pool, then receive.
+    Both frontends lower to the image load and preprocessing pool: the Python
+    multimodal processor path as a pool the width of its IO executor, the Rust
+    multimodal worker pool as a pool the width of its worker count.
     """
     workers = int(recording["workers"])
     service_ms, scale = stage_costs(_curves(recording["levels"]), capacity=workers)
     stages = [FrontendStageConfig(workers=workers, service_ms=service_ms, concurrency_scale=scale)]
-    if recording["frontend"] == "python":
-        stages.append(FrontendStageConfig(service_ms=float(recording["send_ms"])))
-    stages.append(FrontendStageConfig(service_ms=float(recording["receive_ms"])))
     return FrontendRow(measured_for=measurement, stages=stages, provenance=dict(recording.get("provenance", {})))
 
 
-STAGE_LABELS = {"python": ("process", "send", "receive"), "rust": ("process", "receive")}
+STAGE_LABELS = ("process",)
 """Display names of the stages `frontend_row` emits, in order."""

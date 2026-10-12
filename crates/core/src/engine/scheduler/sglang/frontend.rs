@@ -3,28 +3,26 @@
 
 //! Frontend stages between request arrival and the scheduler inbox.
 //!
-//! Behavioral model of the multimodal request path of `TokenizerManager`,
-//! `BaseMultimodalProcessor`, the scheduler's per-request receive preparation,
-//! and the Rust multimodal workers as of sgl-project/sglang v0.5.19 (`0bcd822`,
+//! Behavioral model of the multimodal processor path of `TokenizerManager`,
+//! `BaseMultimodalProcessor` and the Rust multimodal workers as of
+//! sgl-project/sglang v0.5.19 (`0bcd822`,
 //! `python/sglang/srt/managers/tokenizer_manager.py`,
 //! `python/sglang/srt/multimodal/processors/base_processor.py`,
-//! `python/sglang/srt/managers/scheduler_components/request_receiver.py`,
 //! `python/sglang/srt/rust_server/server.py`). Re-implemented in Rust from the
 //! observed semantics; no SGLang source is copied.
 //!
 //! A request walks the configured stages in order, one job per stage. Each
 //! stage is a black box measured as request-level service time on a pool of
 //! workers, and jobs sharing a pool are repriced by the stage's
-//! `concurrency_scale`. The tokenizer-manager loop's synchronous send and the
-//! scheduler's receive preparation are single-worker pools: they serialize
-//! requests but do not stall the dispatch of arrivals into earlier stages as
-//! the real loop thread does; on the measured serving-host grid that simplification
-//! moved TTFT by at most a few percent at eight concurrent requests. The
-//! queueing arithmetic is independently implemented.
+//! `concurrency_scale`. The queueing arithmetic is independently implemented.
 //!
 //! Every entry point settles the completions due before its instant first, so
 //! the timeline never depends on when the scheduler last looked; requests that
 //! left the last stage wait in an exit buffer until `advance` collects them.
+//!
+//! A frontend ends at the hand-off to the scheduler inbox: the tokenizer-manager
+//! send and the scheduler-side receive preparation are not priced (see
+//! `docs/replay/engine/sglang-vl-host-loop.md`).
 
 use std::collections::VecDeque;
 
