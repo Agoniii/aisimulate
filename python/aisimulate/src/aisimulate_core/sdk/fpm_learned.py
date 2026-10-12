@@ -236,9 +236,12 @@ def group_iterations(records: Iterable[dict[str, Any]], join_ranks: str = "none"
     """Group FPM records into iterations (one list of per-rank FPMs each).
 
     ``join_ranks="none"`` treats every record as a single-rank iteration.
-    ``join_ranks="counter"`` joins records sharing ``(worker_id, counter_id)``
-    across ``dp_rank`` values, which matches attention-DP lockstep engines
-    whose ranks publish aligned counters. Iterations without any positive
+    ``join_ranks="counter"`` keys records by ``(worker_id, counter_id)`` and
+    rejects repeated keys. It refuses to join records of different
+    ``dp_rank`` values: Dynamo's publisher assigns ``counter_id`` per rank and
+    also advances it on idle heartbeats, so equal counters on two ranks are
+    not the same scheduler step. A cross-rank join needs a step id that the
+    scheduler synchronizes across ranks. Iterations without any positive
     ``wall_time`` (idle heartbeats) are dropped.
     """
     if join_ranks not in ("none", "counter"):
@@ -272,6 +275,12 @@ def group_iterations(records: Iterable[dict[str, Any]], join_ranks: str = "none"
         grouped[key][rank] = fpm
     for key in sorted(grouped, key=lambda k: (k[0], k[1])):
         ranks = grouped[key]
+        if len(ranks) > 1:
+            raise ValueError(
+                f"worker_id={key[0]!r} counter_id={key[1]} has records from dp_ranks {sorted(ranks)}; "
+                "counter_id is rank-local (each rank's publisher advances it, heartbeats included), so it "
+                "cannot align attention-DP ranks. Train per rank with --join-ranks none"
+            )
         metrics_by_rank = [ranks[rank] for rank in sorted(ranks)]
         if any(float(m.get("wall_time", 0.0)) > 0.0 for m in metrics_by_rank):
             iterations.append(metrics_by_rank)
@@ -608,6 +617,7 @@ def train(
     if target not in TARGETS:
         raise ValueError(f"target must be one of {TARGETS}, got {target!r}")
     features = tuple(features) if features else DEFAULT_FEATURES[worker_type]
+    _reject_duplicate_features(features)
     needs_lists = any(name.startswith(("req_", "slot")) for name in features)
     if needs_lists and not any(
         _has_request_lists(_sched(fpm)) for metrics_by_rank in iterations for fpm in metrics_by_rank
@@ -678,6 +688,14 @@ def train(
 _TREE_ARRAYS = ("left", "right", "feature", "threshold", "value", "missing_left")
 
 
+def _reject_duplicate_features(features: Sequence[str]) -> None:
+    """Same rule as the Rust loader: unique names, so at most ``len(FEATURE_NAMES)`` of them."""
+    seen: set[str] = set()
+    duplicates = sorted({name for name in features if name in seen or seen.add(name)})
+    if duplicates:
+        raise ValueError(f"duplicate features {duplicates}")
+
+
 def validate_artifact(artifact: dict[str, Any]) -> None:
     """Structural pre-check of an artifact (schema, version, target, features, tree shape).
 
@@ -704,6 +722,7 @@ def validate_artifact(artifact: dict[str, Any]) -> None:
     unknown = [name for name in features if name not in FEATURE_NAMES]
     if unknown:
         raise ValueError(f"unknown features {unknown}")
+    _reject_duplicate_features(features)
     stores = artifact.get("stores")
     if not isinstance(stores, dict) or not stores:
         raise ValueError("artifact stores must be a non-empty mapping")
@@ -894,7 +913,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--join-ranks",
         choices=("none", "counter"),
         default="none",
-        help="group per-rank records into iterations by (worker_id, counter_id)",
+        help="'counter' keys records by (worker_id, counter_id) and rejects repeats; cross-rank joins are refused",
     )
 
     tr = sub.add_parser("train", parents=[common], help="fit and export an artifact")

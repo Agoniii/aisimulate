@@ -2589,6 +2589,50 @@ fn learned_model_applies_online_correction_after_tuning() {
 }
 
 #[test]
+fn learned_artifact_feature_list_is_unique_and_bounded() {
+    use super::learned::{FEATURE_COUNT, feature_names};
+    let artifact = |features: Vec<String>| {
+        serde_json::json!({
+            "schema": "aic_fpm_learned_forward_perf", "schema_version": 1,
+            "worker_type": "decode", "target": "ms",
+            "features": features,
+            "stores": {"pure_decode": {"baseline": 5.0, "trees": []}},
+            "metadata": {}
+        })
+        .to_string()
+    };
+    // Every known feature once: FEATURE_COUNT entries fill the buffer exactly.
+    let all = feature_names();
+    assert_eq!(all.len(), FEATURE_COUNT);
+    let model = ForwardPassPerfModel::from_learned(
+        &artifact(all.clone()),
+        ForwardPassPerfOptions::default(),
+    )
+    .unwrap();
+    let mut fpm = decode_fpm(2, 200, 0.0);
+    fpm.scheduled_requests.extend_lengths = Some(vec![1, 1]);
+    fpm.scheduled_requests.past_kv_lengths = Some(vec![100, 100]);
+    assert_eq!(
+        model.estimate_forward_pass_time_ms(&[fpm]).unwrap(),
+        Some(5.0)
+    );
+    // FEATURE_COUNT + 1 entries can only be reached with a repeat: rejected at
+    // load instead of overflowing the prediction buffer.
+    let mut overfull = all.clone();
+    overfull.push(all[0].clone());
+    let err =
+        ForwardPassPerfModel::from_learned(&artifact(overfull), ForwardPassPerfOptions::default())
+            .unwrap_err();
+    assert!(err.to_string().contains("duplicate feature"), "{err}");
+    // A short list with a repeat is rejected too.
+    let repeated = vec![all[1].clone(), all[2].clone(), all[1].clone()];
+    let err =
+        ForwardPassPerfModel::from_learned(&artifact(repeated), ForwardPassPerfOptions::default())
+            .unwrap_err();
+    assert!(err.to_string().contains("duplicate feature"), "{err}");
+}
+
+#[test]
 fn learned_model_rejects_bad_artifacts() {
     let options = ForwardPassPerfOptions::default();
     let mut bad: serde_json::Value = serde_json::from_str(&learned_decode_artifact_json()).unwrap();

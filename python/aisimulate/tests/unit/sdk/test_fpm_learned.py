@@ -6,6 +6,7 @@ from __future__ import annotations
 import gzip
 import json
 import math
+import sys
 
 import pytest
 
@@ -14,6 +15,15 @@ from aisimulate_core.sdk import fpm_learned
 from . import fpm_reference
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _hide_stub_torch(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Collector tests install a stub ``torch`` module at import time; scipy's
+    # array-API check (reached via scikit-learn) calls issubclass on its Tensor.
+    torch = sys.modules.get("torch")
+    if torch is not None and not isinstance(getattr(torch, "Tensor", None), type):
+        monkeypatch.delitem(sys.modules, "torch")
 
 
 def _decode_fpm(nd: int, kv: int, wall: float, *, rank: int = 0, counter: int = 0, var: float = 0.0) -> dict:
@@ -150,10 +160,24 @@ def test_iter_records_and_group_by_counter(tmp_path) -> None:
     assert records[1]["observed_at_unix_ms"] == 1_789_743_132_982
     single = fpm_learned.group_iterations(records, "none")
     assert len(single) == 2  # heartbeat dropped
-    joined = fpm_learned.group_iterations(records, "counter")
-    assert len(joined) == 1
-    assert [m["dp_rank"] for m in joined[0]] == [0, 1]
-    assert fpm_learned.iteration_wall_ms(joined[0]) == pytest.approx(12.0)
+    # the counter join refuses to merge dp_ranks (counter_id is rank-local)
+    with pytest.raises(ValueError, match="rank-local"):
+        fpm_learned.group_iterations(records, "counter")
+    joined = fpm_learned.group_iterations([records[0], records[2]], "counter")
+    assert len(joined) == 1  # heartbeat dropped
+    assert fpm_learned.iteration_wall_ms(joined[0]) == pytest.approx(10.0)
+
+
+def test_counter_join_rejects_heartbeat_offset_ranks() -> None:
+    # Two attention-DP ranks run the same three steps, but rank 1 published an
+    # idle heartbeat first, so its counters are shifted by one. Joining by
+    # counter would pair step k of rank 0 with step k-1 of rank 1.
+    rank0 = [_decode_fpm(2, 100 * (k + 1), 0.01 * (k + 1), rank=0, counter=k) for k in range(3)]
+    rank1 = [_decode_fpm(0, 0, 0.0, rank=1, counter=0)]
+    rank1 += [_decode_fpm(2, 100 * (k + 1), 0.01 * (k + 1), rank=1, counter=k + 1) for k in range(3)]
+    with pytest.raises(ValueError, match="dp_ranks \\[0, 1\\]"):
+        fpm_learned.group_iterations(rank0 + rank1, "counter")
+    assert len(fpm_learned.group_iterations(rank0 + rank1, "none")) == 6
 
 
 def _stump_artifact() -> dict:
@@ -206,6 +230,7 @@ def test_validate_artifact_rejects_unsupported_and_malformed() -> None:
         (lambda a: a.pop("schema_version"), "schema_version"),
         (lambda a: a.__setitem__("target", "seconds"), "target"),
         (lambda a: a["features"].__setitem__(0, "bogus"), "unknown features"),
+        (lambda a: a["features"].append(a["features"][0]), "duplicate features"),
         (lambda a: a["stores"]["pure_decode"]["trees"][0]["left"].__setitem__(0, 0), "larger indices"),
         (lambda a: a["stores"]["pure_decode"]["trees"][0]["right"].__setitem__(1, 2), "both be leaves"),
         (lambda a: a["stores"]["pure_decode"]["trees"][0].__setitem__("missing_left", [True]), "missing_left"),
@@ -216,6 +241,19 @@ def test_validate_artifact_rejects_unsupported_and_malformed() -> None:
             fpm_learned.validate_artifact(bad)
         with pytest.raises(ValueError):
             fpm_learned.evaluate(bad, [[_decode_fpm(2, 100, 0.01)]], predict=lambda it: 1.0)
+
+
+def test_feature_list_is_unique_and_bounded() -> None:
+    # every known feature once is valid; one more entry can only be a repeat
+    full = dict(_stump_artifact(), features=list(fpm_learned.FEATURE_NAMES))
+    assert len(full["features"]) == 135
+    fpm_learned.validate_artifact(full)
+    overfull = dict(full, features=[*fpm_learned.FEATURE_NAMES, fpm_learned.FEATURE_NAMES[0]])
+    with pytest.raises(ValueError, match="duplicate features"):
+        fpm_learned.validate_artifact(overfull)
+    # the trainer applies the same rule before fitting
+    with pytest.raises(ValueError, match="duplicate features"):
+        fpm_learned.train([], "decode", features=["num_decode_requests", "num_decode_requests"])
 
 
 def test_tree_traversal_fails_loudly_on_malformed_nodes() -> None:
@@ -334,10 +372,14 @@ def test_build_dataset_skips_iterations_without_lists_when_features_need_them() 
     inconsistent = _decode_fpm(2, 200, 0.01)
     inconsistent["scheduled_requests"]["extend_lengths"] = [1, 1]
     inconsistent["scheduled_requests"]["past_kv_lengths"] = [5000, 5000]
-    rows = fpm_learned.build_dataset([[with_lists], [without], [inconsistent]], "decode", fpm_learned.REQUEST_FEATURE_NAMES)
+    rows = fpm_learned.build_dataset(
+        [[with_lists], [without], [inconsistent]], "decode", fpm_learned.REQUEST_FEATURE_NAMES
+    )
     assert len(rows["pure_decode"][1]) == 1
     # aggregate-only features keep every iteration
-    rows = fpm_learned.build_dataset([[with_lists], [without], [inconsistent]], "decode", fpm_learned.AGGREGATE_FEATURE_NAMES)
+    rows = fpm_learned.build_dataset(
+        [[with_lists], [without], [inconsistent]], "decode", fpm_learned.AGGREGATE_FEATURE_NAMES
+    )
     assert len(rows["pure_decode"][1]) == 3
     # inconsistent lists are treated as absent by compute_features too (NaN req_* features)
     assert math.isnan(fpm_learned.compute_features([inconsistent])["req_max_past"])
@@ -394,10 +436,14 @@ def test_train_hisim_slot_features_roundtrip() -> None:
         fpm["scheduled_requests"]["extend_lengths"] = [1] * nd
         fpm["scheduled_requests"]["past_kv_lengths"] = [past] * nd
         iterations.append([fpm])
-    artifact = fpm_learned.train(iterations, "decode", features=fpm_learned.FEATURE_PRESETS["hisim"], max_iter=30, min_store_rows=10)
+    artifact = fpm_learned.train(
+        iterations, "decode", features=fpm_learned.FEATURE_PRESETS["hisim"], max_iter=30, min_store_rows=10
+    )
     assert artifact["features"][:2] == ["req_batch_size", "slot0_present"]
     assert len(artifact["features"]) == 1 + 3 * fpm_learned.SLOT_COUNT
     fpm_learned.validate_artifact(artifact)
-    report = fpm_learned.evaluate(artifact, iterations, predict=lambda m: fpm_reference.reference_predict_ms(artifact, m))
+    report = fpm_learned.evaluate(
+        artifact, iterations, predict=lambda m: fpm_reference.reference_predict_ms(artifact, m)
+    )
     # 30 shallow trees on 96 slot columns: a loose fit is enough to prove the slot path is wired end to end
     assert report["pure_decode"]["mape_pct"] < 12.0

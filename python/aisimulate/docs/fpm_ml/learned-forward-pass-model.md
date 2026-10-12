@@ -142,7 +142,7 @@ Training environment, pick one:
        --container-mounts=/path/to/traces:/traces,/path/to/aisimulate:/aisimulate \
        bash -c 'pip install -q /aisimulate/python/aisimulate[learned] && \
                 python -m aisimulate_core.sdk.fpm_learned train --fpm /traces/decode/*.jsonl.gz \
-                  --worker-type decode --join-ranks counter --out /traces/decode_learned.json'
+                  --worker-type decode --out /traces/decode_learned.json'
   ```
 
   No GPU is used; request a CPU partition if the site has one.
@@ -156,7 +156,6 @@ uv sync --project python/aisimulate --extra learned   # installs scikit-learn
 python -m aisimulate_core.sdk.fpm_learned train \
   --fpm decode_worker/*.jsonl.gz \
   --worker-type decode \
-  --join-ranks counter \
   --holdout-frac 0.2 \
   --out models/decode_learned.json
 ```
@@ -165,9 +164,12 @@ python -m aisimulate_core.sdk.fpm_learned train \
   Aggregated engines get up to four stores (`pure_decode`,
   `contains_locally_mixed`, `cross_rank_aggregated`, `pure_prefill`), selected
   by the same rule the regression fallback uses.
-- `--join-ranks counter` groups per-rank records into one iteration by
-  `(worker_id, counter_id)` for attention-DP engines; the label is the maximum
-  positive `wall_time` across ranks. Use `none` for single-rank engines.
+- `--join-ranks` defaults to `none`: every record is one iteration.
+  `counter` keys records by `(worker_id, counter_id)` and rejects repeated
+  keys, but refuses records from more than one `dp_rank` per key. Dynamo's
+  publisher assigns `counter_id` per rank and also advances it on idle
+  heartbeats, so stock attention-DP captures cannot be joined by it; that
+  needs a scheduler-synchronized step id from the producer.
 - Features are named quantities computed identically in `fpm_learned.py` and
   `learned.rs` (135 names, three groups):
   - 21 aggregate features from the FPM v1 counts/sums/variances (preset `v1`);

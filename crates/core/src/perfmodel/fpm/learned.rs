@@ -249,10 +249,15 @@ impl LearnedForwardPassModel {
         if artifact.features.is_empty() {
             return Err(invalid("features list is empty"));
         }
+        // Names must be known and unique, which also bounds the list by
+        // FEATURE_COUNT, the size of the prediction buffer in `predict_ms`.
         let mut feature_indices = Vec::with_capacity(artifact.features.len());
         for name in &artifact.features {
             let index =
                 feature_index(name).ok_or_else(|| invalid(format!("unknown feature {name:?}")))?;
+            if feature_indices.contains(&index) {
+                return Err(invalid(format!("duplicate feature {name:?}")));
+            }
             feature_indices.push(index);
         }
         if artifact.stores.is_empty() {
@@ -514,12 +519,7 @@ impl IterationFeatureVector {
             // (`+ ptok`) and per-request decode lengths one token late
             // (`+ nd`). Extends are not bounded here: speculative decode
             // legitimately extends a decode request by more than one token.
-            let past_total: f64 = s
-                .past_kv_lengths
-                .iter()
-                .flatten()
-                .map(|&p| p as f64)
-                .sum();
+            let past_total: f64 = s.past_kv_lengths.iter().flatten().map(|&p| p as f64).sum();
             let past_consistent = past_total <= pkv + dkv + ptok + nd;
             match (pairs.as_mut(), &s.extend_lengths, &s.past_kv_lengths) {
                 (Some(list), Some(extend), Some(past))
