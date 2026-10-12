@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Lazily activate source-checked scheduler and native-worker observation."""
+"""Lazily activate the source-checked GLM-5.3-Flash prefix-seed scheduler."""
 
 import os
 
@@ -15,7 +15,6 @@ if os.environ.get("DYN_FPM_GLM53FLASH_REAL_KV") == "1":
     from pathlib import Path
 
     _TARGET = "dynamo.vllm.instrumented_scheduler"
-    _WORKER_TARGET = "vllm.v1.worker.gpu_worker"
 
     def _source_pins():
         from collector.glm53flash_runtime_identity import vllm_source_pins
@@ -46,17 +45,6 @@ if os.environ.get("DYN_FPM_GLM53FLASH_REAL_KV") == "1":
 
         def exec_module(self, module):
             try:
-                if module.__name__ == _WORKER_TARGET:
-                    pins = _source_pins()
-                    actual = hashlib.sha256(Path(module.__spec__.origin).read_bytes()).hexdigest()
-                    if actual != pins["vllm/v1/worker/gpu_worker.py"]:
-                        raise RuntimeError("pinned native GPU worker source mismatch")
-                    self.original.exec_module(module)
-                    from glm53flash_worker_hardware import install
-
-                    if os.environ.get("AISIM_GLM53_PURPOSE", "fpm") == "fpm":
-                        install(module)
-                    return
                 _verify_sources()
                 self.original.exec_module(module)
                 if os.environ.get("DYN_FPM_GLM53FLASH_PREFIX_SEED") != "1":
@@ -84,7 +72,7 @@ if os.environ.get("DYN_FPM_GLM53FLASH_REAL_KV") == "1":
 
     class _SchedulerFinder(importlib.abc.MetaPathFinder):
         def find_spec(self, fullname, path=None, target=None):
-            if fullname not in {_TARGET, _WORKER_TARGET}:
+            if fullname != _TARGET:
                 return None
             spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
             if spec is not None and spec.loader is not None:

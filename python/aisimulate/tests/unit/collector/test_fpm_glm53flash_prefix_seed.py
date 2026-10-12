@@ -341,3 +341,23 @@ def test_explicit_align4_decode_contexts_override_the_even_split(monkeypatch, tm
     assert all(rep["prefill_chunks"] == [[[120, 4], [116, 4]]] for rep in record["repetitions"])
     with pytest.raises(ValueError, match="no frozen per-request contexts"):
         module.Glm53FlashPrefixSeedScheduler._bench_decode_context_lengths(250, 2)
+
+
+def test_publication_enrichment_needs_only_the_fpm_measurement(monkeypatch, tmp_path):
+    module = load_producer(monkeypatch)
+    monkeypatch.setattr(sys.modules["vllm"], "__version__", "0.31.0", raising=False)
+    points = [Point("prefill", 1, 2, 64, 0, rows=[[32, 0], [32, 0]])]
+    s = make_scheduler(module, tmp_path, points)
+    run(s, Engine(s), "prefill")
+    s._glm_input = {"source": "seeded_tokens", "seed": 53}
+    s._glm_context_policy = {"measured_context_limit": 131072}
+    s._glm_identity = {"model_config_sha256": "test"}
+    output = {
+        "results": [{"point": {"point_type": "prefill", "total_kv_read_tokens": 0, "benchmark_id": 1}}],
+        "iteration_groups": [],
+    }
+    s._glm_enrich(output, tmp_path / "benchmark.json")
+    assert output["input_provenance"]["seed"] == 53
+    assert output["input_provenance"]["repetition_evidence_manifest"]["records"] == s._glm_evidence_count
+    assert output["producer"]["vllm_package_version"] == "0.31.0"
+    assert output["results"][0]["kv_seed_regime"] == "not_applicable"

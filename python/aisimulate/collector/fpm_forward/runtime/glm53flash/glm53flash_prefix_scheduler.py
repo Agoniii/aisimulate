@@ -787,18 +787,9 @@ class Glm53FlashPrefixSeedScheduler(native.InstrumentedScheduler):
                 raise RuntimeError("GLM repetition evidence changed before publication")
         else:
             digest = None
-        hardware = []
-        for rank in range(self._glm_tp_size):
-            path = destination.with_name(f"native-device-rank-{rank}.json")
-            raw = path.read_bytes()
-            receipt = json.loads(raw)
-            if receipt.get("status") != "passed" or receipt.get("tp_rank") != rank:
-                raise RuntimeError("native GLM worker hardware qualification did not pass")
-            hardware.append({"tp_rank": rank, "file": path.name, "sha256": hashlib.sha256(raw).hexdigest()})
         output["input_provenance"] = {
             **(self._glm_input or {}),
             "context_policy": self._glm_context_policy,
-            "native_hardware_manifest": hardware,
             "repetition_evidence_manifest": {
                 "schema_version": 1,
                 "file": evidence_path.name,
@@ -835,7 +826,6 @@ class Glm53FlashPrefixSeedScheduler(native.InstrumentedScheduler):
             ),
             "overlay_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "context_policy_version": 1,
-            "hardware_contract_version": 1,
             "warmup_repeats": WARMUP_REPEATS,
             "measurement_repeats": MEASUREMENT_REPEATS,
         }

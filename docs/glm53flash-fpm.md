@@ -48,8 +48,6 @@ the pinned Dynamo `InstrumentedScheduler` overlay on `PYTHONPATH`.
   median.
 - Request tokens come from `collector/glm53flash_attention_tokens.py`
   (seed 53, ordinary BPE vocabulary of the pinned tokenizer).
-- `glm53flash_worker_hardware.py` records a GB300/sm103 receipt for each TP
-  rank at `Worker.init_device`, outside the timed window.
 
 Engine arguments, beyond the usual Dynamo benchmark flags:
 `--enable-prefix-caching --prefix-match-unit 4 --kv-cache-dtype fp8_e4m3
