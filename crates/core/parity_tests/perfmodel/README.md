@@ -153,6 +153,19 @@ python/aisimulate/.venv/bin/python -m pytest -q -p no:timeout \
 
 The selective reference-generation command is `pin_goldens.py --refresh deepseek-v32-b200-sglang-isl1024-osl2 glm5-b200-sglang-empirical glm5-b200-sglang-isl16384-osl2 glm52-b200-sglang-isl1024-osl2` using the script in this directory and a clean, isolated checkout with a matching native build. It obtains each metric from the same `_surface_metrics(case, surface)` Rust-backed consumers as the tests. Keep error records unchanged when a surface still raises; these B200 regressions do not establish additional GPU accuracy coverage.
 
+### GLM-5.3-Flash mixed-step attention phases in PR #323
+
+`Glm53Attention` operations are named per layer (`attention_N`), so the
+mixed-step attention filters did not recognize them. Context attention rode
+the shared pass at the combined context-plus-decode shape, and generation
+attention was omitted. The filters now classify these operations by
+`is_context`. Only the two GLM SOL `mixed` records were refreshed with
+`pin_goldens.py --refresh` (ISL 4096, prefix 2048, one decode request). Both
+now include decode attention, and context attention is queried at the
+prefill shape. `glm53flash-fp8-gb300-vllm-tp2-sol` changes from 37.865342 to
+38.665549 ms. `glm53flash-nvfp4-gb300-sglang-tp4-sol` changes from 22.443503
+to 22.869943 ms. Static records and all other models are unchanged.
+
 ## Engine-Step Benchmark
 
 [The engine-step benchmark](benchmark_engine_step.py) measures the current Rust
