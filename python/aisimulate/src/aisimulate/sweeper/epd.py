@@ -12,13 +12,28 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Mapping
 from dataclasses import asdict, replace
+from typing import Any
 
 from .config import EncoderSearch, SmartSearchConfig, Workload
 from .kv_estimate import NoPerfDatabase, resolve_backend_version
 from .replay import EncoderPoolSpec, NativeEncoderTiming, ReplayReport, ReplaySpec
 
 logger = logging.getLogger(__name__)
+
+
+def replay_workload(workload: Mapping[str, Any]) -> Workload:
+    """The sweeper's workload model of a replay spec's workload.
+
+    The compiler spells a constant-rate load as the arrival interval it derives from
+    the rate, which the workload model does not know; it validates as the rate.
+    """
+    workload = dict(workload)
+    interval = workload.pop("arrival_interval_ms", None)
+    if interval is not None and workload.get("request_rate") is None:
+        workload["request_rate"] = 1_000.0 / float(interval)
+    return Workload.model_validate(workload)
 
 
 def resolve_encoder_catalog(config: SmartSearchConfig) -> dict[str, EncoderPoolSpec]:
@@ -75,6 +90,13 @@ def resolve_encoder_pools(
             model_name, images.height, images.width, min_pixels=images.min_pixels, max_pixels=images.max_pixels
         )
         visual_tokens = geometry.visual_tokens * images.count
+        # The memory gate prices that geometry, not the raw dimensions.
+        runtime = RuntimeConfig(
+            isl=workload.isl,
+            osl=workload.osl,
+            num_image_tokens=geometry.output_tokens * geometry.sequences,
+            num_images_per_request=images.count,
+        )
     else:
         visual_tokens = BaseBackend.effective_prefill_isl(model_name, runtime) - runtime.isl
     if context_length is not None and runtime.isl + visual_tokens + runtime.osl > context_length:
@@ -157,9 +179,10 @@ def _native_encoder_rows(encoder, *, model_name, system, backend, version, datab
 
     The forward is priced at replay time by the canonical timing model at the pool's
     tensor width, the oracle a language rank uses for its vision tower; memory and
-    power come from the analytical candidate helper at the cap. The CPU preprocessing
-    extrapolates the tokenizer manager's measured `process` stage per image: the
-    encoder servers run the same image processor over the whole batch.
+    power come from the analytical candidate helper at the cap, its gate sized at the
+    processor geometry the replay lays out rather than the raw image dimensions. The
+    CPU preprocessing extrapolates the tokenizer manager's measured `process` stage per
+    image: the encoder servers run the same image processor over the whole batch.
     """
     from aisimulate.sdk.errors import InsufficientMemoryError, NoFeasibleConfigError
     from aisimulate.sdk.sweep import _get_encoder_worker_candidates

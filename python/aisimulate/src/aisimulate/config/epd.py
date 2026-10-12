@@ -33,8 +33,9 @@ def encoder_prediction_fields(encoder: EncoderPoolSpec) -> dict:
         ),
     }
     if encoder.native is not None:
-        # The native loop does not use the analytical overlay's rate factor.
-        del fields["rate_degradation"]
+        # The native loop does not use the analytical overlay's latency and rate factors.
+        for name in ("latency_correction", "rate_degradation"):
+            del fields[name]
     return fields
 
 
@@ -56,7 +57,7 @@ def validate_epd_prediction_mapping(value: dict, spec: ReplaySpec) -> None:
     try:
         prediction = CorePredictionConfig.model_validate(value)
         engine = prediction.engine
-        excluded = {"rate_degradation"} if encoder.native is not None else set()
+        excluded = {"latency_correction", "rate_degradation"} if encoder.native is not None else set()
         if engine.workers.encoder is None or engine.workers.encoder.model_dump(exclude=excluded) != (
             encoder_prediction_fields(encoder)
         ):

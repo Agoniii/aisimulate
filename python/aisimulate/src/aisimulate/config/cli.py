@@ -148,12 +148,20 @@ def _validate_epd(traffic, engine) -> None:
         raise ValueError("EPD requires both traffic.source.images and engine.workers.encoder")
     if encoder is None:
         return
+    if images.identity != "unique":
+        raise ValueError(
+            "encoder pools do not model image identity pools; traffic.source.images.identity must be unique"
+        )
     if encoder.mode == "native":
         if not _only(engine.backend, "sglang"):
             raise ValueError("native encoder replay requires backend=sglang")
         for role in ("aggregated", "prefill", "decode"):
             worker = getattr(engine.workers, role)
-            if worker is not None and worker.startup_seconds != 0:
+            if worker is None:
+                continue
+            if worker.timing.type != "default":
+                raise ValueError("native encoder replay requires default language timing")
+            if worker.startup_seconds != 0:
                 raise ValueError("encoder pools require static worker pools")
         return
     if images.min_pixels is not None or images.max_pixels is not None:

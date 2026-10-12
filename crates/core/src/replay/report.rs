@@ -133,10 +133,11 @@ pub struct TraceThroughputStats {
     /// GPUs of the static encoder pool ahead of the language workers; 0 without one.
     pub encoder_gpus: usize,
     /// GPU-hours = Σ_role `worker_seconds × gpus_per_worker / 3600` plus the
-    /// encoder pool's `encoder_gpus × duration / 3600` — the deployment's
-    /// provisioned GPU-time (already including the startup ramp and drain tail,
-    /// since `*_worker_seconds` do). Computed in `finish()` straight from the
-    /// mocker's own worker parallelism, so it needs no external config.
+    /// encoder pool's GPU-seconds `/ 3600`, integrated on the same clock as the
+    /// worker-seconds — the deployment's provisioned GPU-time (already
+    /// including the startup ramp and drain tail, since `*_worker_seconds` do).
+    /// Computed in `finish()` straight from the mocker's own worker
+    /// parallelism, so it needs no external config.
     pub gpu_hours: f64,
 }
 
@@ -1136,6 +1137,9 @@ pub struct TraceCollector {
     /// count varies with startup / drain / scaling.
     prefill_worker_seconds: f64,
     decode_worker_seconds: f64,
+    /// Encoder-pool GPU-seconds integrated on the same clock as the
+    /// worker-seconds (see `add_encoder_gpu_seconds`); 0.0 without a pool.
+    encoder_gpu_seconds: f64,
     /// Static provisioned worker counts `(prefill, decode)` for externally
     /// clocked runtimes with a fixed deployment size. When `Some`, `finish()`
     /// derives worker-seconds as `count × duration_s` instead of using the
@@ -1145,7 +1149,8 @@ pub struct TraceCollector {
     /// `finish()` to turn worker-seconds into gpu_hours.
     prefill_gpus_per_worker: usize,
     decode_gpus_per_worker: usize,
-    /// GPUs of the static encoder pool, charged for the whole duration.
+    /// GPUs of the static encoder pool; `add_encoder_gpu_seconds` charges them
+    /// on every clock advance.
     encoder_gpus: usize,
     runtime_evidence: crate::replay::OfflineRuntimeEvidence,
     agentic_trajectory: Option<AgenticTrajectorySnapshot>,
@@ -1345,6 +1350,14 @@ impl TraceCollector {
     pub(crate) fn add_worker_seconds(&mut self, prefill: f64, decode: f64) {
         self.prefill_worker_seconds += prefill;
         self.decode_worker_seconds += decode;
+    }
+
+    /// Add the encoder pool's GPU-seconds for the interval just elapsed:
+    /// `encoder_gpus × dt_s`. The runtime calls this on the same clock
+    /// advances as `add_worker_seconds`, so both terms of `gpu_hours` share one
+    /// clock. Without an encoder pool `encoder_gpus` is 0 and nothing accrues.
+    pub(crate) fn add_encoder_gpu_seconds(&mut self, dt_s: f64) {
+        self.encoder_gpu_seconds += self.encoder_gpus as f64 * dt_s;
     }
 
     /// Declare a fixed `(prefill, decode)` provisioned worker count for an
@@ -1939,6 +1952,7 @@ impl TraceCollector {
         let static_worker_count = self.static_worker_count;
         let accumulated_prefill_worker_seconds = self.prefill_worker_seconds;
         let accumulated_decode_worker_seconds = self.decode_worker_seconds;
+        let accumulated_encoder_gpu_seconds = self.encoder_gpu_seconds;
         let prefill_gpus_per_worker = self.prefill_gpus_per_worker;
         let decode_gpus_per_worker = self.decode_gpus_per_worker;
         let encoder_gpus = self.encoder_gpus;
@@ -2095,24 +2109,27 @@ impl TraceCollector {
         let num_tpot_samples = tpots.len();
         let num_e2e_latency_samples = e2e_latencies.len();
         let duration_s = (duration_ms / 1000.0).max(1e-9);
-        // Provisioned worker-seconds: static count × duration for an externally
-        // clocked runtime, else the runtime-integrated accumulator.
-        let (prefill_worker_seconds, decode_worker_seconds) = match static_worker_count {
-            Some((prefill, decode)) => (
-                prefill as f64 * reporting_duration_s,
-                decode as f64 * reporting_duration_s,
-            ),
-            None => (
-                accumulated_prefill_worker_seconds,
-                accumulated_decode_worker_seconds,
-            ),
-        };
+        // Provisioned worker-seconds and encoder GPU-seconds on one clock:
+        // static count × duration for an externally clocked runtime, else the
+        // runtime-integrated accumulators.
+        let (prefill_worker_seconds, decode_worker_seconds, encoder_gpu_seconds) =
+            match static_worker_count {
+                Some((prefill, decode)) => (
+                    prefill as f64 * reporting_duration_s,
+                    decode as f64 * reporting_duration_s,
+                    reporting_duration_s * encoder_gpus as f64,
+                ),
+                None => (
+                    accumulated_prefill_worker_seconds,
+                    accumulated_decode_worker_seconds,
+                    accumulated_encoder_gpu_seconds,
+                ),
+            };
         // GPU-hours straight from the mocker's own worker parallelism (no
-        // external GPU-count config). 0 when gpus_per_worker was not set. The
-        // encoder pool is static, so it is charged for the whole duration.
+        // external GPU-count config). 0 when gpus_per_worker was not set.
         let gpu_hours = (prefill_worker_seconds * prefill_gpus_per_worker as f64
             + decode_worker_seconds * decode_gpus_per_worker as f64
-            + reporting_duration_s * encoder_gpus as f64)
+            + encoder_gpu_seconds)
             / 3600.0;
         // Goodput only when an SLA was supplied; otherwise it is undefined.
         let goodput = sla.is_set().then(|| TraceGoodputStats {

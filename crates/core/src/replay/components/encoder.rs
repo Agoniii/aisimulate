@@ -28,7 +28,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, ensure};
 use rustc_hash::FxHashMap;
 
 use crate::engine::{TimingModel, VisionShape, transfer_delay_ms};
@@ -221,6 +221,10 @@ impl<T> EncoderPool<T> {
                      use an AIC timing model compiled with encoder_parallel"
                 )
             })?;
+        ensure!(
+            forward_ms.is_finite() && forward_ms >= 0.0,
+            "vision timing provider returned non-finite duration {forward_ms}ms"
+        );
         Ok(f64::from(images) * self.spec.preprocess_ms_per_image + forward_ms)
     }
 }

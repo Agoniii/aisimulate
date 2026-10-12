@@ -22,15 +22,10 @@ def _execution_traffic(spec: ReplaySpec) -> dict[str, Any]:
     the resolved concurrency travels on the spec, and the request count of a
     relative stop is the runner's `round(ratio * load)`.
     """
-    from ..sweeper.config import Workload
+    from ..sweeper.epd import replay_workload
 
-    workload = dict(spec.workload)
-    # The compiler spells a constant-rate load as the interval it derives from the rate,
-    # which the workload model does not know; validate it as the rate.
-    interval = workload.pop("arrival_interval_ms", None)
-    if interval is not None and workload.get("request_rate") is None:
-        workload["request_rate"] = 1_000.0 / float(interval)
-    traffic = Workload.model_validate(workload).model_dump(mode="json")
+    interval = spec.workload.get("arrival_interval_ms")
+    traffic = replay_workload(spec.workload).model_dump(mode="json")
     for key in _SEARCH_ONLY_TRAFFIC:
         traffic.pop(key, None)
     rate = traffic.pop("request_rate", None)

@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, StrictBool, field_validator, model_serializer, model_validator
+from pydantic import AfterValidator, Field, StrictBool, field_validator, model_serializer, model_validator
 
 from aisimulate.fpm_profile import FpmModelProfile
 
@@ -21,6 +21,7 @@ from .common import (
     StrictModel,
     SystemsPath,
     SystemsRoot,
+    _absolute_path,
     is_active_engine_model_control,
     requested_backend_version,
 )
@@ -442,14 +443,14 @@ class FrontendPredictionConfig(StrictModel):
 class HostProfileConfig(StrictModel):
     """Take the frontend stages from a measured host cost table instead of spelling them out."""
 
-    path: str = Field(min_length=1)
+    path: Annotated[str, Field(min_length=1), AfterValidator(_absolute_path)]
     frontend: FrontendKind
 
 
 class VisionPredictionConfig(StrictModel):
     """Vision encoder hosted on the language worker."""
 
-    cache_mib: PositiveInt = Field(
+    cache_mib: NonNegativeInt = Field(
         default=100, description="SGLang multimodal embedding cache in MiB (SGLANG_VLM_CACHE_SIZE_MB)."
     )
     encoder_parallel: Literal["tp", "dp"] = Field(
@@ -556,6 +557,8 @@ def _validate_encoder_mode(encoder: EncoderPredictionConfig | EncoderRecommendat
             raise ValueError("native encoder replay requires host_profile and transfer.bandwidth_gb_per_second")
         if encoder.host_profile.frontend != "python":
             raise ValueError("the encoder servers run the Python image processor; host_profile.frontend must be python")
+        if encoder.latency_correction != 1.0:
+            raise ValueError("latency_correction applies to analytical encoder pools only")
     elif encoder.host_profile is not None or encoder.transfer is not None:
         raise ValueError("host_profile and transfer apply to encoder mode=native only")
 
@@ -664,7 +667,7 @@ class EstimatorPolicyConfig(StrictModel):
         roles = [getattr(workers, role, None) for role in ("aggregated", "prefill", "decode")]
         unsupported_provider = "afd" in modes or getattr(workers, "encoder", None) is not None
         if self.systems_paths not in (None, ["default"]) and unsupported_provider:
-            unsupported = "AFD" if "afd" in modes else "analytical encoder pools"
+            unsupported = "AFD" if "afd" in modes else "encoder pools"
             raise ValueError(f"engine.systems_paths does not support {unsupported}")
         if unsupported_provider and any(
             worker is not None

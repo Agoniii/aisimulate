@@ -737,10 +737,20 @@ where
 
     /// A request entering the encoder pool has arrived: the collector and the
     /// traffic statistics see it now, not when its embeddings are delivered.
+    /// The pool encodes `images_per_request` per request, so a request carrying
+    /// its own image placeholders is invalid here.
     fn register_parked_arrival(
         &mut self,
         ready: &mut ReplayReadyArrival<Metadata>,
     ) -> anyhow::Result<()> {
+        if !ready.request.metadata().images.is_empty() {
+            return Err(crate::replay::ReplayError::InvalidSpec(
+                "encoder pool runs take requests without image placeholders; \
+                 the pool encodes images_per_request per request"
+                    .to_string(),
+            )
+            .into());
+        }
         let uuid = ready.request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
         ready.request.metadata_mut().uuid = Some(uuid);
         self.collector.try_on_arrival(
@@ -1365,16 +1375,18 @@ where
     // ------------------------------------------------------------------
 
     /// Advance the sim clock to `new_now_ms`, integrating provisioned
-    /// worker-seconds over the interval just elapsed. `worker_count()` counts
-    /// active + starting-up + draining workers, so this captures the startup
-    /// ramp and the scale-down drain tail. Aggregated replay has no separate
-    /// prefill pool, so it reports through the decode role (prefill = 0).
+    /// worker-seconds and the encoder pool's GPU-seconds over the interval just
+    /// elapsed. `worker_count()` counts active + starting-up + draining
+    /// workers, so this captures the startup ramp and the scale-down drain
+    /// tail. Aggregated replay has no separate prefill pool, so it reports
+    /// through the decode role (prefill = 0).
     pub(crate) fn advance_now_ms(&mut self, new_now_ms: f64) {
         let dt_ms = (new_now_ms - self.now_ms).max(0.0);
         if dt_ms > 0.0 {
             let decode_worker_seconds = self.engine.worker_count() as f64 * dt_ms / 1000.0;
             self.collector
                 .add_worker_seconds(0.0, decode_worker_seconds);
+            self.collector.add_encoder_gpu_seconds(dt_ms / 1000.0);
         }
         self.now_ms = new_now_ms;
     }
@@ -1724,7 +1736,7 @@ mod agentic_warmup_tests {
 
     use super::*;
     use crate::engine::{
-        Backend, EncoderShape, EngineConfig, NativeHostOffloadConfig, TimingModelConfig,
+        Backend, EncoderShape, EngineConfig, ImageSpec, NativeHostOffloadConfig, TimingModelConfig,
     };
     use crate::replay::components::{NoReplayMetadata, ReplayMode};
     use crate::replay::core::NoEngineEvents;
@@ -1877,6 +1889,78 @@ mod agentic_warmup_tests {
             .unwrap();
         let error = replay.run().unwrap_err();
         assert!(error.to_string().contains("encoder pool"), "{error:#}");
+    }
+
+    #[test]
+    fn encoder_pool_rejects_requests_carrying_image_placeholders() {
+        let config = ReplayEngineConfig {
+            rank: EngineConfig {
+                block_size: 64,
+                num_gpu_blocks: 1024,
+                timing_model: TimingModelConfig::Fixed {
+                    prefill_ms: 1.0,
+                    decode_ms: 0.0,
+                },
+                ..EngineConfig::for_backend(Backend::Sglang)
+            },
+            ..Default::default()
+        };
+        let factory = ReplayEngineFactory::new()
+            .role_factory(&config, WorkerStage::Aggregated, false)
+            .unwrap();
+        let shape = EncoderShape {
+            sequences: 1,
+            patch_tokens: 4,
+            transformer_tokens: 4,
+            output_tokens: 4,
+        };
+        let request = DirectRequest {
+            tokens: vec![1, 2, 3, 4],
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(1)),
+            arrival_timestamp_ms: Some(0.0),
+            images: vec![ImageSpec {
+                identity: 1,
+                token_start: 0,
+                token_end: 4,
+                encoder: shape,
+                embedding_bytes: 0,
+            }],
+            ..DirectRequest::default()
+        };
+        let timing = EngineConfig::for_backend(Backend::Sglang)
+            .built_in_timing_model()
+            .unwrap();
+        let replay = Runtime::new_composed(
+            factory,
+            AdmissionQueue::new_requests(
+                std::collections::VecDeque::from([request]),
+                ReplayMode::Trace,
+            ),
+            1,
+            None,
+            |dp, topology| Ok(AggregatedRoundRobinPlacement::new(dp, topology)),
+        )
+        .unwrap()
+        .with_encoder(Some((
+            EncoderSpec {
+                instances: 1,
+                max_batch: 1,
+                gpus_per_instance: 1,
+                images_per_request: 1,
+                shape,
+                preprocess_ms_per_image: 0.0,
+                transfer_bytes_per_image: 0,
+                transfer_bandwidth_gb_s: 1.0,
+                timing_model: None,
+            },
+            timing,
+        )));
+        let error = replay.run().unwrap_err();
+        assert!(
+            error.to_string().contains("without image placeholders"),
+            "{error:#}"
+        );
     }
 
     #[test]

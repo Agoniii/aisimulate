@@ -218,6 +218,8 @@ class EncoderSearch(BaseModel):
                 raise ValueError("native encoder replay requires host_profile and transfer_bandwidth_gb_per_second")
             if len(self.batch_size) != 1:
                 raise ValueError("native encoder replay takes one batch cap, not a batch_size search")
+            if self.latency_correction != 1.0:
+                raise ValueError("latency_correction applies to analytical encoder pools only")
         return self
 
     @field_validator("tp", "batch_size", "workers", mode="before")
@@ -958,7 +960,7 @@ class SearchSpace(BaseModel):
             {"prefill", "decode"} if "disagg" in self.deployment_mode else set()
         )
         if self.systems_paths not in (None, ["default"]) and self._uses_legacy_estimator_provider():
-            unsupported = "AFD" if set(self.deployment_mode) & {"afd", "afd+pd"} else "analytical encoder pools"
+            unsupported = "AFD" if set(self.deployment_mode) & {"afd", "afd+pd"} else "encoder pools"
             raise ValueError(f"systems_paths does not support {unsupported}")
         if nondefault and (
             set(self.deployment_mode) & {"afd", "afd+pd"}
@@ -1304,11 +1306,17 @@ class SmartSearchConfig(BaseModel):
                 raise ValueError("image workloads require search_space.encoder or a language worker hosting vision")
             if set(search.deployment_mode) & {"afd", "afd+pd"}:
                 raise ValueError("image workloads are unsupported for AFD")
+            if any(backend != "sglang" for backend in search.backend):
+                raise ValueError("native VL replay requires backend=sglang")
             return self
         if (encoder is None) != (workload.images is None):
             raise ValueError("EPD requires both search_space.encoder and workload.images")
         if encoder is None:
             return self
+        if workload.images.identity != "unique":
+            raise ValueError("encoder pools do not model image identity pools; workload.images.identity must be unique")
+        if encoder.mode == "native" and any(backend != "sglang" for backend in search.backend):
+            raise ValueError("native encoder replay requires backend=sglang")
         if search.agg_vision or search.prefill_vision:
             raise ValueError("search_space.encoder and a language worker hosting the vision tower are exclusive")
         if encoder.mode == "analytical" and (search.agg_host_loop or search.prefill_host_loop):
@@ -1329,11 +1337,10 @@ class SmartSearchConfig(BaseModel):
         elif workload.isl is None or workload.osl is None:
             raise ValueError("native encoder replay requires synthetic traffic with isl and osl, not a trace")
         for role in ("agg", "prefill", "decode"):
-            if encoder.mode == "analytical":
-                if getattr(self.search_space, f"{role}_forward_model") != "op_level":
-                    raise ValueError("analytical EPD requires op_level forward models")
-                if getattr(self.search_space, f"{role}_timing_model") is not None:
-                    raise ValueError("analytical EPD does not support custom language timing")
+            if encoder.mode == "analytical" and getattr(self.search_space, f"{role}_forward_model") != "op_level":
+                raise ValueError("analytical EPD requires op_level forward models")
+            if getattr(self.search_space, f"{role}_timing_model") is not None:
+                raise ValueError("encoder pools require default language timing")
             if getattr(self.search_space, f"{role}_startup_time") not in (None, 0.0):
                 raise ValueError("encoder pools require static worker pools")
         if self.search_space.startup_time not in (None, 0.0):

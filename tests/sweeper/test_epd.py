@@ -538,6 +538,33 @@ def test_native_catalog_names_rejected_tps_and_propagates_invalid_data(monkeypat
         assert "native encoder: tp=2 skipped" in caplog.text
 
 
+def test_native_catalog_prechecks_memory_on_the_processor_geometry(monkeypatch):
+    import aisimulate.sdk.sweep as aic_sweep
+    from aisimulate.vl import table
+    from aisimulate_core.sdk import perf_database
+
+    recorded = []
+
+    def record(**kwargs):
+        recorded.append(kwargs["runtime_config"])
+        raise NoFeasibleConfigError("stop")
+
+    frontend = SimpleNamespace(stages=[SimpleNamespace(service_ms=3.0)])
+    monkeypatch.setattr(perf_database, "get_database_view", lambda *a, **kw: SimpleNamespace(version="resolved"))
+    monkeypatch.setattr("aisimulate.sweeper.epd.resolve_backend_version", lambda *args: "pinned")
+    monkeypatch.setattr(table, "resolve_frontend", lambda *a, **kw: (frontend, "digest"))
+    monkeypatch.setattr(aic_sweep, "_get_encoder_worker_candidates", record)
+    workload = dict(isl=128, osl=32, concurrency=8, num_request_ratio=2)
+    workload["images"] = dict(height=448, width=448, count=1, max_pixels=65536)
+    search_space = _config().search_space.model_dump() | {"encoder": _native_encoder()}
+    config = _config(search_space=search_space, workload=workload)
+    with pytest.raises(NoFeasibleConfigError, match="stop"):
+        resolve_encoder_catalog(config)
+    # The memory precheck sees the pixel-budgeted geometry the replay encodes, not the raw image.
+    (runtime,) = recorded
+    assert runtime.image_height == 0 and runtime.num_image_tokens == 64
+
+
 @pytest.mark.parametrize("modes", [["agg", "disagg"], ["disagg", "agg"], ["agg"]])
 def test_epd_native_search_preserves_available_modes(monkeypatch, caplog, modes):
     from aisimulate_core.sdk import perf_database

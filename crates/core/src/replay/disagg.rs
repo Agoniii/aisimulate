@@ -2327,10 +2327,20 @@ where
 
     /// A request entering the encoder pool has arrived: the collector and the
     /// traffic statistics see it now, not when its embeddings are delivered.
+    /// The pool encodes `images_per_request` per request, so a request carrying
+    /// its own image placeholders is invalid here.
     fn register_parked_arrival(
         &mut self,
         ready: &mut ReadyArrival<ReplayRequestPayload, Metadata>,
     ) -> Result<()> {
+        if !ready.request.metadata().images.is_empty() {
+            return Err(crate::replay::ReplayError::InvalidSpec(
+                "encoder pool runs take requests without image placeholders; \
+                 the pool encodes images_per_request per request"
+                    .to_string(),
+            )
+            .into());
+        }
         let uuid = ready.request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
         ready.request.metadata_mut().uuid = Some(uuid);
         self.collector.try_on_arrival(
@@ -3170,9 +3180,10 @@ where
     // ------------------------------------------------------------------
 
     /// Advance the sim clock to `new_now_ms`, integrating provisioned
-    /// worker-seconds for both pools over the interval just elapsed.
-    /// `worker_count()` counts active + starting-up + draining workers, so this
-    /// captures the startup ramp and the scale-down drain tail.
+    /// worker-seconds for both pools and the encoder pool's GPU-seconds over
+    /// the interval just elapsed. `worker_count()` counts active + starting-up
+    /// + draining workers, so this captures the startup ramp and the
+    /// scale-down drain tail.
     fn advance_now_ms(&mut self, new_now_ms: f64) {
         let dt_ms = (new_now_ms - self.now_ms).max(0.0);
         if dt_ms > 0.0 {
@@ -3180,6 +3191,7 @@ where
             let decode_worker_seconds = self.decode_engine.worker_count() as f64 * dt_ms / 1000.0;
             self.collector
                 .add_worker_seconds(prefill_worker_seconds, decode_worker_seconds);
+            self.collector.add_encoder_gpu_seconds(dt_ms / 1000.0);
         }
         self.now_ms = new_now_ms;
     }

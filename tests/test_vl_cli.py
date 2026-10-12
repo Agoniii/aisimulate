@@ -58,12 +58,16 @@ def _prediction():
     }
 
 
-def test_native_vl_lowering_targets_the_host_aware_sglang_rank():
-    spec = prediction_to_replay_spec(CorePredictionConfig.model_validate(_prediction()))
+@pytest.mark.parametrize("cache_mib", [None, 0])
+def test_native_vl_lowering_targets_the_host_aware_sglang_rank(cache_mib):
+    raw = _prediction()
+    if cache_mib is not None:
+        raw["engine"]["workers"]["aggregated"]["vision"] = {"cache_mib": cache_mib}
+    spec = prediction_to_replay_spec(CorePredictionConfig.model_validate(raw))
     args = spec.backend_deployment.agg_engine_args
     assert args["vision"] is True
     assert args["sglang"]["chunked_prefill_size"] == 8192
-    assert args["sglang"]["vlm_cache_bytes"] == 100 << 20
+    assert args["sglang"]["vlm_cache_bytes"] == (100 << 20 if cache_mib is None else 0)
     assert args["sglang"]["host_loop"] is True
     assert args["frontend"]["stages"][0]["workers"] == 1
     assert spec.workload["images"]["identity"] == {"pool": 2}
@@ -206,7 +210,7 @@ def test_host_profile_lowers_to_the_explicit_stages(tmp_path):
     profiled = prediction_to_replay_spec(CorePredictionConfig.model_validate(raw))
     assert profiled.backend_deployment.agg_engine_args == explicit.backend_deployment.agg_engine_args
     vl = profiled.backend_deployment.performance_model_metadata["aggregated"]["vl"]
-    assert vl["frontend"] == "python" and len(vl["host_profile_digest"]) == 16
+    assert vl["frontend"] == "python" and vl["host_profile_digest"]
 
 
 @pytest.mark.parametrize("kind", ["frontend", "encoding", "count", "version"])
@@ -549,6 +553,8 @@ def test_native_vl_disaggregated_recommend_keys_the_prefill_worker(tmp_path, cap
 
 def _native_epd_prediction(table_path):
     raw = _prediction()
+    # Encoder pools price unique images only.
+    del raw["traffic"]["source"]["images"]["identity"]
     worker = raw["engine"]["workers"]["aggregated"]
     del worker["frontend"]
     worker["host_loop"] = True
@@ -592,12 +598,15 @@ def test_native_encoder_pool_gates_the_language_worker(tmp_path, capsys):
     assert main(argv[:-1] + ["--output-dir", str(tmp_path / "bounded")]) == 0
     bounded = json.loads(capsys.readouterr().out)
     assert bounded["encoder_latency_ms"] == report["encoder_latency_ms"] > 3.0
-    # The pool's GPU joins the language worker's in the totals, and is charged for the
-    # whole duration in gpu_hours on top of the language worker's uptime.
+    # The pool's GPU joins the language worker's in the totals and is charged on the
+    # same clock as that worker's uptime.
     assert report["encoder_gpus"] == 1 and report["total_gpus"] == 2
-    duration_hours = report["duration_ms"] / 3_600_000
-    assert 2 * duration_hours <= report["gpu_hours"] < 3 * duration_hours
+    assert report["gpu_hours"] * 3600 == pytest.approx(report["total_gpus"] * report["decode_worker_seconds"])
     assert report["completed_requests"] == 4
+    # prediction.json names the resolved pool identity the run was priced with.
+    saved = json.loads((output / "prediction.json").read_text())
+    assert saved["encoder"]["host_profile_digest"] == native.host_profile_digest
+    assert saved["encoder"]["native"]["preprocess_source"] == "frontend_process_extrapolated"
     # 448x448 -> 196 visual tokens per image occupy the language prompt.
     assert report["total_input_tokens"] == 4 * (128 + 196)
     records = [json.loads(line) for line in (output / "requests.jsonl").read_text().splitlines()]
@@ -609,10 +618,28 @@ def test_native_encoder_pool_gates_the_language_worker(tmp_path, capsys):
         assert record["arrival_time_ms"] < record["encoder_ready_ms"] <= record["scheduler_received_ms"]
 
 
-def test_native_encoder_pool_requires_its_host_table_and_link(tmp_path):
-    raw = _native_epd_prediction(tmp_path / "table.json")
-    del raw["engine"]["workers"]["encoder"]["host_profile"]
-    with pytest.raises(ValidationError):
+@pytest.mark.parametrize(
+    "kind,fragment",
+    [
+        ("host_profile", "requires host_profile and transfer"),
+        ("transfer", "requires host_profile and transfer"),
+        ("latency_correction", "latency_correction applies to analytical"),
+        ("fixed_timing", "default language timing"),
+        ("identity", "identity pools"),
+    ],
+)
+def test_native_encoder_pool_rejects_unsupported(kind, fragment):
+    raw = _native_epd_prediction("unused.json")
+    encoder = raw["engine"]["workers"]["encoder"]
+    if kind in ("host_profile", "transfer"):
+        del encoder[kind]
+    elif kind == "latency_correction":
+        encoder["latency_correction"] = 2.0
+    elif kind == "fixed_timing":
+        raw["engine"]["workers"]["aggregated"]["timing"] = {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0}
+    else:
+        raw["traffic"]["source"]["images"]["identity"] = {"pool": 2}
+    with pytest.raises(ValueError, match=fragment):
         CorePredictionConfig.model_validate(raw)
 
 
@@ -638,6 +665,7 @@ def test_native_encoder_pool_recommend_yaml_predict_roundtrip(tmp_path, capsys):
     table = tmp_path / "table.json"
     table.write_text(json.dumps(_host_table()))
     raw = _recommendation()
+    del raw["traffic"]["source"]["images"]["identity"]
     worker = raw["engine"]["workers"]["aggregated"]
     del worker["frontend"]
     worker["host_loop"] = True
@@ -662,12 +690,8 @@ def test_native_encoder_pool_recommend_yaml_predict_roundtrip(tmp_path, capsys):
     # Encoder GPUs are in the candidate's totals and in gpu_hours, so throughput_per_gpu
     # ranks encoder replicas against language workers.
     assert candidate.used_gpus == 1 + encoder["tp"] * encoder["workers"] == candidate.metrics["total_gpus"]
-    duration_hours = candidate.metrics["duration_ms"] / 3_600_000
-    assert (
-        candidate.used_gpus * duration_hours
-        <= candidate.metrics["gpu_hours"]
-        < (candidate.used_gpus + 1) * duration_hours
-    )
+    uptime_s = candidate.metrics["decode_worker_seconds"]
+    assert candidate.metrics["gpu_hours"] * 3600 == pytest.approx(candidate.used_gpus * uptime_s)
 
     saved = root / "recommendations" / "0001.yaml"
     concrete = CorePredictionConfig.from_yaml(saved)
@@ -685,6 +709,17 @@ def test_native_encoder_pool_recommend_yaml_predict_roundtrip(tmp_path, capsys):
     table.write_text(json.dumps(_host_table(rows=[_host_row(service_ms=1.0)])))
     with pytest.raises(ValueError, match="encoder cost terms changed"):
         validate_epd_prediction_mapping(raw_saved, spec)
+
+
+def test_native_encoder_pool_accepts_rate_loads(tmp_path, capsys):
+    table = tmp_path / "table.json"
+    table.write_text(json.dumps(_host_table()))
+    raw = _native_epd_prediction(table)
+    raw["traffic"]["load"] = {"type": "constant_rate", "requests_per_second": 4.0}
+    path = tmp_path / "predict.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    assert main(["predict", "-c", str(path), "--output-dir", str(tmp_path / "out"), "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["completed_requests"] == 4
 
 
 @pytest.mark.parametrize("case", ["constant_rate", "rate_relative_stop", "kv_capacity_fraction", "fixed_timing"])

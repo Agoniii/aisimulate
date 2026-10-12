@@ -495,12 +495,12 @@ class EngineReplayRunner:
                 capture_per_request=output_requirements.capture_per_request,
             )
         if encoder is not None:
-            from .sweeper.config import OptimizationGoal, Workload
-            from .sweeper.epd import apply_encoder_overlay
+            from .sweeper.config import OptimizationGoal
+            from .sweeper.epd import apply_encoder_overlay, replay_workload
 
             if spec.adapters or spec.execution_mode != "offline":
                 raise InvalidRunnerError("encoder pools require offline static pools without adapters")
-            workload = Workload.model_validate(spec.workload)
+            workload = replay_workload(spec.workload)
             if encoder.mode == "analytical":
                 if output_requirements.capture_per_request or output_requirements.include_raw_report:
                     raise InvalidRunnerError("analytical EPD cannot produce per-request or raw replay reports")

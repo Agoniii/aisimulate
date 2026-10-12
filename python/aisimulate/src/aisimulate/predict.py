@@ -159,6 +159,10 @@ def run_prediction(
         vl = (spec.backend_deployment.performance_model_metadata.get(role) or {}).get("vl")
         if isinstance(vl, dict):
             native = {**native, "vl": vl}
+    # A native encoder pool carries the resolved identity it was scored with.
+    encoder_identity = spec.backend_deployment.performance_model_metadata.get("encoder")
+    if isinstance(encoder_identity, dict):
+        native = {**native, "encoder": encoder_identity}
     summary = prediction_summary(native)
     summary.update(normalize_power_summary(report.metrics))
     if encoder is not None:

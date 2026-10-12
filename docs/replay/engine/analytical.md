@@ -127,7 +127,7 @@ A disaggregated variant is in
 | `engine.workers.encoder.tensor` | `1` | Scalar or `choices` | Positive. |
 | `engine.workers.encoder.replicas` | `1` | Scalar or `choices` | Positive. |
 | `engine.workers.encoder.batch_size` | `1` | Scalar or `choices` | 1 to 8. |
-| `engine.workers.encoder.latency_correction` | `1.0` | fixed | Positive multiplier on encoder latency. |
+| `engine.workers.encoder.latency_correction` | `1.0` | fixed | Positive multiplier on encoder latency. Analytical pools only; `mode: native` rejects any other value. |
 | `engine.workers.encoder.rate_degradation` | `0.9` | fixed | In `(0, 1]`. Fraction of ideal encoder throughput that is usable. Unused by `mode: native`. |
 | `engine.workers.encoder.mode` | `analytical` | fixed | `analytical` adds the encoder batch latency to mean TTFT. `native` replays SGLang `--encoder-only` servers event by event and gates each request's admission to the language worker; `batch_size` is then the loop's cap (`SGLANG_ENCODER_MAX_BATCH_SIZE`, default 8) and must be a scalar. SGLang only. See [Native encoder pools](#native-encoder-pools). |
 | `engine.workers.encoder.host_profile` | Unset | fixed | `mode: native` only, required: `{path, frontend: python}`. The table's `process` stage prices the encoder's CPU preprocessing. |

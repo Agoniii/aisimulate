@@ -968,6 +968,10 @@ def _vision_encoder_config(model_path: str) -> common.VisionEncoderConfig:
         # Other nested families may need specialized encoder builders.
         enc_cfg = get_vision_encoder_config_from_model_info(model_info)
     if not isinstance(enc_cfg, common.VisionEncoderConfig):
+        if get_vision_encoder_config_from_model_info(model_info) is not None:
+            # A tower nested under another family's geometry (Llama 4 tiles, Qwen3.5)
+            # needs its own encoder builder.
+            raise ValueError(f"encoder pools price Qwen3-VL and Kimi K3 vision towers; {model_path!r} is not supported")
         # Not a VL model -> EPD cannot apply (config error, not a type bug).
         raise ValueError(f"EPD (encoder disaggregation) requested but model {model_path!r} has no vision encoder.")
     return enc_cfg

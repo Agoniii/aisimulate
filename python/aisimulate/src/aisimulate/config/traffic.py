@@ -40,6 +40,12 @@ class ImageInput(StrictModel):
         default=None, description="Processor rescale upper bound; defaults to the checkpoint's preprocessor value."
     )
 
+    @model_validator(mode="after")
+    def _validate_pixel_bounds(self) -> ImageInput:
+        if self.min_pixels is not None and self.max_pixels is not None and self.min_pixels > self.max_pixels:
+            raise ValueError("images.min_pixels cannot exceed images.max_pixels")
+        return self
+
 
 class SyntheticSource(StrictModel):
     type: Literal["synthetic"] = "synthetic"

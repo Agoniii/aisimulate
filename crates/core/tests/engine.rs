@@ -2094,10 +2094,19 @@ fn encoder_pool_gates_admission_to_the_language_worker() {
     // only in-flight slot, and the second request enters the pool then.
     assert_eq!(records[0].2, 49.0);
     assert_eq!(records[1].1, records[0].3 + 24.0);
-    // The pool's GPUs are provisioned for the whole run.
-    assert_eq!(report.throughput.encoder_gpus, 4);
-    let duration_s = report.throughput.duration_ms / 1000.0;
-    assert!(report.throughput.gpu_hours * 3600.0 >= 4.0 * duration_s);
+    // The pool's GPUs are provisioned for the whole run, on the same clock as
+    // the language ranks' worker-seconds.
+    let throughput = &report.throughput;
+    assert_eq!(throughput.encoder_gpus, 4);
+    let language_gpu_seconds = throughput.prefill_worker_seconds
+        * throughput.prefill_gpus_per_worker as f64
+        + throughput.decode_worker_seconds * throughput.decode_gpus_per_worker as f64;
+    let encoder_gpu_seconds = throughput.encoder_gpus as f64 * throughput.duration_ms / 1000.0;
+    assert!(
+        (throughput.gpu_hours * 3600.0 - (language_gpu_seconds + encoder_gpu_seconds)).abs() < 1e-9,
+        "gpu_hours {} vs language {language_gpu_seconds}s + encoder {encoder_gpu_seconds}s",
+        throughput.gpu_hours * 3600.0
+    );
     assert_eq!(report.latency.encoder_latency_ms, Some(24.0));
 }
 

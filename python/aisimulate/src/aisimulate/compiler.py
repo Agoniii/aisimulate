@@ -158,8 +158,8 @@ def _pin_estimator_version_aliases(deployment: BackendDeploymentSpec) -> Backend
 
 
 def _prediction_encoder(config: CorePredictionConfig, workload):
-    from .sweeper.config import EncoderSearch, Workload
-    from .sweeper.epd import resolve_encoder_pools
+    from .sweeper.config import EncoderSearch
+    from .sweeper.epd import replay_workload, resolve_encoder_pools
 
     engine = config.engine
     encoder = engine.workers.encoder
@@ -187,7 +187,7 @@ def _prediction_encoder(config: CorePredictionConfig, workload):
             resolve_model_context_length(engine.model) if engine.context_length == "max" else engine.context_length
         ),
         encoder=shape,
-        workload=Workload.model_validate(workload),
+        workload=replay_workload(workload),
     )
     if len(pools) != 1:
         raise ValueError("prediction requires exactly one feasible encoder pool")
