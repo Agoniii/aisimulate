@@ -390,6 +390,31 @@ def test_exported_artifact_in_rust_matches_fitted_sklearn_model(target: str) -> 
         assert model.estimate_forward_pass_time_ms(iteration) == pytest.approx(want, rel=1e-9)
 
 
+def test_fpm5_preset_trains_on_counts_and_sums_only() -> None:
+    pytest.importorskip("sklearn")
+    assert len(fpm_learned.FPM5_FEATURE_NAMES) == 17
+    assert set(fpm_learned.FPM5_FEATURE_NAMES) < set(fpm_learned.AGGREGATE_FEATURE_NAMES)
+    assert not any("var_" in name or "squared" in name for name in fpm_learned.FPM5_FEATURE_NAMES)
+    assert fpm_learned.FEATURE_PRESETS["fpm5"] == fpm_learned.FPM5_FEATURE_NAMES
+    # Gym-style records: the five counts/sums, no variances, no per-request lists.
+    iterations = []
+    for i in range(200):
+        nd = 1 + i % 16
+        kv = 1000 * (1 + (i * 7) % 50)
+        fpm = {
+            "version": 1,
+            "wall_time": 0.005 + 0.0004 * nd + 0.00000002 * kv,
+            "scheduled_requests": {"num_decode_requests": nd, "sum_decode_kv_tokens": kv},
+            "queued_requests": {},
+        }
+        iterations.append([fpm])
+    artifact = fpm_learned.train(
+        iterations, "decode", features=fpm_learned.FEATURE_PRESETS["fpm5"], max_iter=30, min_store_rows=10
+    )
+    assert artifact["features"] == list(fpm_learned.FPM5_FEATURE_NAMES)
+    assert fpm_learned.evaluate(artifact, iterations)["pure_decode"]["mape_pct"] < 5.0
+
+
 def test_build_dataset_rejects_misaligned_request_lists() -> None:
     bad = _decode_fpm(3, 300, 0.01)
     bad["scheduled_requests"]["extend_lengths"] = [1, 1]

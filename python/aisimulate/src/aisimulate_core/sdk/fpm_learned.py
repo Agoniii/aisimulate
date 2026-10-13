@@ -149,13 +149,27 @@ ATOMIC_DECODE_FEATURE_NAMES: tuple[str, ...] = (
     "req_sum_past_squared",
 )
 
+# Aggregates computable from the five FPM v1 counts and sums alone
+# (num_prefill_requests, sum_prefill_tokens, sum_prefill_kv_tokens,
+# num_decode_requests, sum_decode_kv_tokens), e.g. FPM Gym data. Drops the two
+# variances and the decode sum of squares recovered from var_decode_kv_tokens;
+# without a variance those would assume equal request lengths.
+FPM5_FEATURE_NAMES: tuple[str, ...] = tuple(
+    name
+    for name in AGGREGATE_FEATURE_NAMES
+    if name
+    not in ("var_prefill_length", "var_decode_kv_tokens", "sum_decode_kv_squared", "log1p_sum_decode_kv_squared")
+)
+
 # Feature presets: ``v1`` uses aggregates only (works on any FPM stream);
+# ``fpm5`` uses the aggregates that need no variance (counts and sums only);
 # ``atomic5`` / ``atomic10`` / ``sglang18`` / ``hisim`` need per-request lists;
 # ``all`` is the union. ``sglang18`` is the full SGLang-simulator set the atomic
 # sets were derived from; it is kept for comparison and for prefill models that
 # must extrapolate to traffic unlike their training data (design.md §8.8).
 FEATURE_PRESETS: dict[str, tuple[str, ...]] = {
     "v1": AGGREGATE_FEATURE_NAMES,
+    "fpm5": FPM5_FEATURE_NAMES,
     "atomic5": ATOMIC_DECODE_FEATURE_NAMES,
     "atomic10": ATOMIC_PREFILL_FEATURE_NAMES,
     "sglang18": REQUEST_FEATURE_NAMES,
@@ -166,7 +180,7 @@ FEATURE_PRESETS: dict[str, tuple[str, ...]] = {
 # request per step (not valid with speculative decoding: use ``atomic10`` or
 # ``sglang18`` there); prefill and aggregated (mixed) workers use the ten. The
 # producer must emit extend_lengths / past_kv_lengths; aggregate-only streams
-# need an explicit ``--features v1``.
+# need an explicit ``--features v1`` (or ``fpm5`` without variances).
 DEFAULT_FEATURES: dict[str, tuple[str, ...]] = {
     "decode": ATOMIC_DECODE_FEATURE_NAMES,
     "prefill": ATOMIC_PREFILL_FEATURE_NAMES,
@@ -637,7 +651,7 @@ def train(
     ):
         raise ValueError(
             "per-request features requested but no FPM record carries extend_lengths/past_kv_lengths; "
-            "collect with the per-request FPM extension or pass --features v1"
+            "collect with the per-request FPM extension or pass --features v1 (or fpm5)"
         )
     dataset = build_dataset(iterations, worker_type, features)
     if not dataset:
@@ -935,7 +949,7 @@ def _build_parser() -> argparse.ArgumentParser:
     tr.add_argument(
         "--features",
         default=None,
-        help="preset (v1 | atomic5 | atomic10 | sglang18 | hisim | all) or comma-separated feature names; "
+        help="preset (v1 | fpm5 | atomic5 | atomic10 | sglang18 | hisim | all) or comma-separated feature names; "
         "default: atomic5 for decode, atomic10 for prefill / aggregated",
     )
     tr.add_argument("--target", choices=TARGETS, default="log_ms")

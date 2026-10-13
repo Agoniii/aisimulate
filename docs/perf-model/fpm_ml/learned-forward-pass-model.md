@@ -172,7 +172,8 @@ python -m aisimulate_core.sdk.fpm_learned train \
   needs a scheduler-synchronized step id from the producer.
 - Features are named quantities computed identically in `fpm_learned.py` and
   `learned.rs` (135 names, three groups):
-  - 21 aggregate features from the FPM v1 counts/sums/variances (preset `v1`);
+  - 21 aggregate features from the FPM v1 counts/sums/variances (preset `v1`;
+    `fpm5` is the 17 of them that need no variance);
   - the 18 per-request features of the SGLang simulator `MLTimePredictor`
     (`req_*`: sum/max/min extend and past, cross terms, attention FLOPs proxy,
     `is_decode`/`is_prefill`; preset `sglang18`);
@@ -196,7 +197,14 @@ python -m aisimulate_core.sdk.fpm_learned train \
   Σ extend·past, Σ extend²). `sglang18` is the full 18-feature set they were
   derived from; use it for a prefill model that must extrapolate to traffic
   unlike its training data. Aggregate-only streams must opt in with
-  `--features v1`.
+  `--features v1`. Data that carries only the five FPM v1 counts and sums
+  (`num_prefill_requests`, `sum_prefill_tokens`, `sum_prefill_kv_tokens`,
+  `num_decode_requests`, `sum_decode_kv_tokens`; e.g. FPM Gym) uses
+  `--features fpm5`: the 17 `v1` features that need no variance. It drops
+  `var_prefill_length`, `var_decode_kv_tokens` and the decode sum of squares
+  recovered from the variance, which a missing variance would fill as if
+  every request had the same length. Like `v1`, it cannot tell a batch of
+  equal requests from one long request plus short ones of the same total.
 - The model is a scikit-learn `HistGradientBoostingRegressor` on
   `log(wall_ms)` per store, exported to plain JSON
   (`schema = aic_fpm_learned_forward_perf`, version 1). No pickle is involved
