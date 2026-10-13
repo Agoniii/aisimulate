@@ -53,8 +53,13 @@ NCCL operators supply analytical children within these boundaries.
   is outside the boundary. `Glm53Ffn` records the routing/clamp/precision
   contract explicitly; generic MoE measurements cannot satisfy it. Rust
   analytical children supply SOL only and are excluded from the measured
-  identity. The diagnostic `Glm53Router` means FP32 GateLinear alone and is
+  identity. The diagnostic `Glm53Router` means the gate projection alone and is
   nested inside FFN, never emitted as an additional production measured op.
+  Both pinned runtimes keep the gate weight in BF16 and run a BF16 x BF16
+  tensor-core GEMM with FP32 logits output (vLLM `GateLinear` with
+  `out_dtype=float32`; SGLang `MoEGate`, which uses FP32 weights only with
+  `router_fp32`). Its SOL uses BF16 tensor throughput, BF16 weight and input
+  traffic, and FP32 output traffic.
 - Routed-expert SOL keeps compute and activation traffic on the actual
   `tokens x top-8` assignments, but reads each distinct expert's local TP
   shard once per forward. The distinct count is the uniform-routing
@@ -80,7 +85,7 @@ workspace and fragmentation require native runtime admission evidence.
 The SOL implementation expresses mathematical work and payload traffic,
 not kernel launch counts or a claim of measured performance. KDA prefill
 uses a tensor-core lower bound for delta-rule recurrence, while decode uses
-FP32 scalar throughput. mHC and the router require an explicit GPU FP32 rate.
+FP32 scalar throughput. mHC requires an explicit GPU FP32 rate.
 Until the Ops data consumer is installed, explicit SILICON requests for the
 new operators fail; HYBRID retains `Source::Sol`. No Kimi/GDN/Mamba table is
 borrowed. GPU collection, accuracy gates and measured readiness are independent
