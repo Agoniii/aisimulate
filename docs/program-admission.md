@@ -20,8 +20,9 @@ The example uses fixed timing for functional reproduction. Replace its timing
 with a validated performance model for GPU latency studies. Keep the native
 physical KV capacity and the policy's logical program capacity separate.
 `capacity_tokens_per_worker` means tokens for one whole replica, not tokens per
-GPU multiplied by TP. For the captured SWE TP4 configuration, 163840 blocks
-times 16 tokens means 2621440 logical tokens per replica.
+GPU multiplied by TP. For example, 1,000 logical blocks of 16 tokens mean
+16,000 logical tokens per replica. See the [configuration reference](reference/configuration.md#program-admission)
+for every parameter, default and validation constraint.
 
 ## Supported behavior
 
