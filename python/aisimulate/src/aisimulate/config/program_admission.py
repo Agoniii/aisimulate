@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Modified defaults derived from ai-dynamo/dynamo, Apache-2.0:
-# https://github.com/ai-dynamo/dynamo/blob/8b326623b189b5d2c40bf0cfb78721551abee568/components/src/dynamo/thunderagent_router/router.py
+# https://github.com/ai-dynamo/dynamo/blob/65a27b73b1aa35c0655e3eb0fbc50e327e2aa5d9/components/src/dynamo/thunderagent_router/router.py
 """Public configuration for the offline program admission behavioral model."""
 
 from __future__ import annotations

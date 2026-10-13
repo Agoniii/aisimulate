@@ -107,7 +107,7 @@ and the deployed controller's tick phase need separate calibration.
 ## Source and computational cost
 
 The modified model is derived from Dynamo's ThunderAgent router and program
-state at `8b326623b189b5d2c40bf0cfb78721551abee568`, Apache-2.0. Source paths,
+state at `65a27b73b1aa35c0655e3eb0fbc50e327e2aa5d9`, Apache-2.0. Source paths,
 copyright and immutable URLs are recorded in `THIRD_PARTY_NOTICES.md` and the
 implementation headers. It is separate from Dynamo's live Router construction.
 

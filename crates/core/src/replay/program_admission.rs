@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 // Modified behavioral model derived from ai-dynamo/dynamo at
-// 8b326623b189b5d2c40bf0cfb78721551abee568:
+// 65a27b73b1aa35c0655e3eb0fbc50e327e2aa5d9:
 // components/src/dynamo/thunderagent_router/{router,program_state}.py.
-// Source: https://github.com/ai-dynamo/dynamo/tree/8b326623b189b5d2c40bf0cfb78721551abee568/components/src/dynamo/thunderagent_router
+// Source: https://github.com/ai-dynamo/dynamo/tree/65a27b73b1aa35c0655e3eb0fbc50e327e2aa5d9/components/src/dynamo/thunderagent_router
 // This is an offline logical-budget model, not a live Dynamo Router adapter.
 
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};

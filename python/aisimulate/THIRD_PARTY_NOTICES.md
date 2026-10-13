@@ -12,18 +12,18 @@ SPDX-License-Identifier: Apache-2.0
 behavioral models and configuration defaults derived from
 `components/src/dynamo/thunderagent_router/router.py` and `program_state.py` in
 ai-dynamo/dynamo at immutable commit
-`8b326623b189b5d2c40bf0cfb78721551abee568`.
+`65a27b73b1aa35c0655e3eb0fbc50e327e2aa5d9`.
 The descriptions of those behaviors and defaults in
 `docs/program-admission.md`, `docs/program-admission-validation.zh-CN.md`, and
 `examples/cli/program-admission.yaml` document the modified model and share
 this attribution. Validation results and experiment construction are original
 AISimulate work.
 
-Source: https://github.com/ai-dynamo/dynamo/tree/8b326623b189b5d2c40bf0cfb78721551abee568/components/src/dynamo/thunderagent_router
+Source: https://github.com/ai-dynamo/dynamo/tree/65a27b73b1aa35c0655e3eb0fbc50e327e2aa5d9/components/src/dynamo/thunderagent_router
 
 Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 Licensed under Apache-2.0. Upstream license:
-https://github.com/ai-dynamo/dynamo/blob/8b326623b189b5d2c40bf0cfb78721551abee568/LICENSE
+https://github.com/ai-dynamo/dynamo/blob/65a27b73b1aa35c0655e3eb0fbc50e327e2aa5d9/LICENSE
 This offline implementation is modified for deterministic virtual time,
 incremental budget accounting, native replay integration and bounded cleanup.
 It does not include a live Dynamo Router implementation.
