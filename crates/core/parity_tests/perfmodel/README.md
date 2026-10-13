@@ -166,6 +166,22 @@ prefill shape. `glm53flash-fp8-gb300-vllm-tp2-sol` changes from 37.865342 to
 38.665549 ms. `glm53flash-nvfp4-gb300-sglang-tp4-sol` changes from 22.443503
 to 22.869943 ms. Static records and all other models are unchanged.
 
+### GLM-5.3-Flash router precision in PR #323
+
+The GLM gate projection is a BF16 x BF16 tensor-core GEMM with FP32 logits in
+both pinned runtimes (vLLM `GateLinear`, SGLang `MoEGate`). Its SOL previously
+used scalar FP32 throughput with FP32 weight and input traffic. It now uses
+BF16 tensor throughput, BF16 weight and input bytes, and FP32 output bytes.
+The four GLM SOL records were refreshed with `pin_goldens.py --refresh`; the
+offline checkpoint registration in the same PR does not change them.
+
+| Case ID | Mixed step | Static context | Static generation | Static total |
+| --- | --- | --- | --- | --- |
+| `glm53flash-fp8-gb300-vllm-tp2-sol` | 38.665549 -> 36.240498 | 37.856 -> 35.432 | 1.553 -> 1.540 | 39.409 -> 36.972 |
+| `glm53flash-nvfp4-gb300-sglang-tp4-sol` | 22.869943 -> 20.444891 | 22.435 -> 20.011 | 0.738 -> 0.726 | 23.173 -> 20.737 |
+
+Values are in milliseconds. All other records are unchanged.
+
 ## Engine-Step Benchmark
 
 [The engine-step benchmark](benchmark_engine_step.py) measures the current Rust

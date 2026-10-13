@@ -79,8 +79,12 @@ are the explicit all-reduces, so no `MoEDispatch` op is emitted.
   is outside the boundary. `Glm53Ffn` records the routing/clamp/precision
   contract explicitly. Rust analytical children supply SOL only; the
   measured list above supplies SILICON/HYBRID. The diagnostic `Glm53Router`
-  means FP32 GateLinear alone and is nested inside the SOL children, never
-  emitted as a production or measured op.
+  means the gate projection alone and is nested inside the SOL children, never
+  emitted as a production or measured op. Both pinned runtimes keep the gate
+  weight in BF16 and run a BF16 x BF16 tensor-core GEMM with FP32 logits output
+  (vLLM `GateLinear` with `out_dtype=float32`; SGLang `MoEGate`, which uses
+  FP32 weights only with `router_fp32`). Its SOL uses BF16 tensor throughput,
+  BF16 weight and input traffic, and FP32 output traffic.
 - Routed-expert SOL keeps compute and activation traffic on the actual
   `tokens x top-8` assignments, but reads each distinct expert's local TP
   shard once per forward. The distinct count is the uniform-routing
@@ -106,7 +110,7 @@ workspace and fragmentation require native runtime admission evidence.
 The SOL implementation expresses mathematical work and payload traffic,
 not kernel launch counts or a claim of measured performance. KDA prefill
 uses a tensor-core lower bound for delta-rule recurrence, while decode uses
-FP32 scalar throughput. mHC and the router require an explicit GPU FP32 rate.
+FP32 scalar throughput. mHC requires an explicit GPU FP32 rate.
 
 SILICON fails closed. Construction requires every consumed table
 (`gemm_perf`, `moe_perf`, `kda_perf`, `mhc_module_perf`,
