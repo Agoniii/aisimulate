@@ -685,8 +685,10 @@ pub struct Glm53RouterOp {
     pub topk: u32,
 }
 impl Glm53RouterOp {
+    /// BF16 gate weight: both pinned runtimes keep the unquantized gate in the
+    /// model dtype (vLLM `GateLinear`, SGLang `MoEGate` without `router_fp32`).
     pub fn weight_bytes(&self) -> f64 {
-        4.0 * f64::from(self.num_experts) * f64::from(self.hidden_size)
+        2.0 * f64::from(self.num_experts) * f64::from(self.hidden_size)
     }
     pub fn sol(&self, spec: &SystemSpec, x: f64) -> Result<PerformanceResult, AicError> {
         identity(&self.backend, &self.checkpoint_format)?;
@@ -697,13 +699,16 @@ impl Glm53RouterOp {
             return Ok(zero());
         }
         let (h, e) = (self.hidden_size as f64, self.num_experts as f64);
-        // FP32 GateLinear only. Sigmoid/bias/top-k belong to the native
-        // MoE boundary; they must not also be timed here.
+        // Gate projection only: BF16 x BF16 tensor-core GEMM with an FP32
+        // logits epilogue on both backends (vLLM GateLinear cuteDSL/cuBLAS
+        // tiers with out_dtype=float32; SGLang MoEGate tiny_gemm_bf16 /
+        // linear_bf16_fp32). Sigmoid/bias/top-k belong to the native MoE
+        // boundary; they must not also be timed here.
         Ok(leaf(
             spec,
             2.0 * x * h * e,
-            self.weight_bytes() + 4.0 * x * (h + e),
-            scalar_rate(spec)?,
+            self.weight_bytes() + 2.0 * x * h + 4.0 * x * e,
+            quant_tc_flops(spec, GemmQuantMode::Bfloat16.mapping())?,
         ))
     }
     pub fn query(&self, db: &PerfDatabase, tokens: u32) -> Result<PerformanceResult, AicError> {
@@ -1118,10 +1123,12 @@ pub(crate) mod tests {
         assert_eq!(sparse_pairs(4096.0, 4096.5, 4, 2048), (512.0, 1024.5));
     }
     #[test]
-    fn fp32_gate_has_independent_hand_calculated_roofline() {
+    fn bf16_gate_with_fp32_logits_has_independent_hand_calculated_roofline() {
         let mut spec = db(DatabaseMode::Sol).system_spec.clone();
         spec.gpu.mem_bw = 1e6;
-        spec.gpu.fp32_flops = Some(1e9);
+        spec.gpu.bfloat16_tc_flops = Some(1e9);
+        // The scalar FP32 rate must not price the gate projection.
+        spec.gpu.fp32_flops = Some(1.0);
         let op = Glm53RouterOp {
             name: "router_3".into(),
             backend: "vllm".into(),
@@ -1130,11 +1137,13 @@ pub(crate) mod tests {
             num_experts: 4,
             topk: 2,
         };
-        //3 tokens:2*3*8*4=192 FP32 FLOPs;128 weight+3*(8+4)*4=272 bytes.
+        // 3 tokens: 2*3*8*4=192 BF16 FLOPs; 64 BF16 weight + 3*8*2 BF16
+        // input + 3*4*4 FP32 logits = 160 bytes.
         let result = op.sol(&spec, 3.0).unwrap();
         assert_eq!(result.sol.unwrap().math_ms, 0.000192);
-        assert_eq!(result.sol.unwrap().mem_ms, 0.272);
-        assert_eq!(result.latency_ms, 0.272);
+        assert_eq!(result.sol.unwrap().mem_ms, 0.16);
+        assert_eq!(result.latency_ms, 0.16);
+        assert_eq!(op.weight_bytes(), 64.0);
     }
     #[test]
     fn logits_use_one_row_per_request_and_include_native_vocab_gather() {

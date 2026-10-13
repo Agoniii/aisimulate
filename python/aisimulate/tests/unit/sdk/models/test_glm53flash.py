@@ -297,10 +297,10 @@ def test_measured_composition_uses_generic_ops_and_one_glm_attention_table(path,
 
 @pytest.mark.parametrize(
     ("backend", "prefill_ms", "decode_ms"),
-    [("vllm", 334.87059419292984, 13.066380602915983), ("sglang", 350.4071011642707, 13.012015546915993)],
+    [("vllm", 295.9030065577298, 13.040700526115971), ("sglang", 311.43951352907044, 12.986335470115982)],
 )
 def test_sol_is_unchanged_by_measured_composition(backend, prefill_ms, decode_ms):
-    # Pinned from the SOL-only graph at PR #323 f317d2bc: GLM boundaries keep
+    # Pinned from the SOL-only graph at PR #323 3a71965a: GLM boundaries keep
     # their analytical formulas in SOL mode, so op-level SOL (and the FPM
     # roofline built from it) is bit-identical after adding generic children.
     model = RustForwardPassPerfModel.best_available(_config("SOL", backend))
@@ -362,3 +362,64 @@ def test_tp1_fits_one_gb300_only_with_the_nvfp4_checkpoint(backend, version, tmp
     assert estimate("nvidia/GLM-5.3-Flash-NVFP4", "nvfp4")["total_kv_size_bytes"] > 0
     with pytest.raises(ValueError, match="no KV budget"):
         estimate("zai-org/GLM-5.3-Flash", "fp8_block")
+
+
+# sha256 of config.json / hf_quant_config.json at the pinned revisions in
+# MODEL_REVISIONS (checkpoint asset-assembly manifest). FP8 ships no sidecar.
+PINNED_CONFIG_SHA256 = {
+    "zai-org/GLM-5.3-Flash": {
+        "config": "bb8f01c42cb92a52ca72e65afb4d5bd8d11aef083cd210e8de25dfb904f23e9f",
+    },
+    "nvidia/GLM-5.3-Flash-NVFP4": {
+        "config": "e23c5d98f53e861d49a51bd3c68591621c5482ce829e42c31724152322fba03d",
+        "hf_quant_config": "1277df937b780e7de8eace66286ffad207f57d33b536b40c9c35635b235c17c6",
+    },
+}
+
+
+@pytest.mark.parametrize("path", MODEL_REVISIONS)
+def test_pinned_checkpoints_resolve_offline_to_bundled_revision(path, monkeypatch, tmp_path):
+    """Live Hugging Face ``main`` must never replace the pinned checkpoint config."""
+    import hashlib
+    import shutil
+
+    from aisimulate_core.sdk import utils
+
+    assert set(PINNED_CONFIG_SHA256) == set(MODEL_REVISIONS)
+    assert path in common.DefaultHFModels
+    bundle = utils._get_model_config_path()
+    stem = path.replace("/", "--")
+    for kind, digest in PINNED_CONFIG_SHA256[path].items():
+        assert hashlib.sha256((bundle / f"{stem}_{kind}.json").read_bytes()).hexdigest() == digest
+    assert (bundle / f"{stem}_hf_quant_config.json").exists() == ("hf_quant_config" in PINNED_CONFIG_SHA256[path])
+
+    network_calls = []
+
+    def drifted_main(hf_id, filename="config.json", **_kwargs):
+        # Mirrors the post-pin upstream edit: an extra quantization ignore entry.
+        network_calls.append((hf_id, filename))
+        payload = json.loads((bundle / f"{stem}_config.json").read_text())
+        payload["quantization_config"] = {"ignore": ["model.layers.45.mtp"]}
+        return payload
+
+    monkeypatch.setattr(utils, "_download_hf_json", drifted_main)
+    monkeypatch.setattr(utils, "_download_hf_config", drifted_main)
+    utils.get_model_config_from_model_path.cache_clear()
+    utils._load_model_config_from_model_path.cache_clear()
+    try:
+        resolved = utils.get_model_config_from_model_path(path)["raw_config"]
+        # The native producers compare the loaded local checkpoint against the
+        # pinned HF identity; a byte-identical local copy must match exactly.
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+        shutil.copyfile(bundle / f"{stem}_config.json", checkpoint / "config.json")
+        if "hf_quant_config" in PINNED_CONFIG_SHA256[path]:
+            shutil.copyfile(bundle / f"{stem}_hf_quant_config.json", checkpoint / "hf_quant_config.json")
+        local = utils.get_model_config_from_model_path(str(checkpoint))["raw_config"]
+    finally:
+        utils.get_model_config_from_model_path.cache_clear()
+        utils._load_model_config_from_model_path.cache_clear()
+
+    assert network_calls == []
+    assert resolved == local
+    assert resolved.get("quantization_config", {}).get("ignore") != ["model.layers.45.mtp"]
