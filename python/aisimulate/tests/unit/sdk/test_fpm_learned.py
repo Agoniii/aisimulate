@@ -315,7 +315,8 @@ def test_train_export_roundtrip_matches_sklearn() -> None:
     assert fpm_learned.DEFAULT_FEATURES["prefill"] == fpm_learned.ATOMIC_PREFILL_FEATURE_NAMES
     assert set(fpm_learned.ATOMIC_DECODE_FEATURE_NAMES) < set(fpm_learned.ATOMIC_PREFILL_FEATURE_NAMES)
     assert set(fpm_learned.ATOMIC_PREFILL_FEATURE_NAMES) < set(fpm_learned.REQUEST_FEATURE_NAMES)
-    # Exported trees reproduce the in-distribution fit closely.
+    # In-distribution fit sanity check; export parity with the fitted sklearn
+    # model is test_exported_artifact_in_rust_matches_fitted_sklearn_model.
     report = fpm_learned.evaluate(artifact, rng_iterations)
     assert report["pure_decode"]["mape_pct"] < 3.0
     # Structural checks the Rust loader enforces too.
@@ -350,6 +351,43 @@ def test_rust_model_matches_reference_predictor() -> None:
     assert rust_report["pure_decode"]["mape_pct"] == pytest.approx(ref_report["pure_decode"]["mape_pct"])
     assert model.learned_feature_names() == artifact["features"]
     assert model.diagnostics()["source"] == "learned"
+
+
+@pytest.mark.parametrize("target", fpm_learned.TARGETS)
+def test_exported_artifact_in_rust_matches_fitted_sklearn_model(target: str) -> None:
+    # Export parity: the sklearn model the trainer fits and the exported
+    # artifact evaluated by the Rust loader predict the same milliseconds.
+    pytest.importorskip("sklearn")
+    native = pytest.importorskip("aisimulate_core._native")
+    if not hasattr(native.RustForwardPassPerfModel, "from_learned"):
+        pytest.skip("compiled extension predates the learned model")
+    from sklearn.ensemble import HistGradientBoostingRegressor
+
+    from aisimulate_core.sdk.rust_engine_step import RustForwardPassPerfModel
+
+    iterations = []
+    for i in range(300):
+        nd = 1 + i % 16
+        past = [200 * (1 + (i * 7 + r * 3) % 40) for r in range(nd)]
+        wall = (0.005 + 0.0004 * nd + 0.00000002 * sum(past)) * (1.0 + 0.01 * ((i * 13) % 7 - 3))
+        fpm = _decode_fpm(nd, sum(past), wall, counter=i)
+        fpm["scheduled_requests"]["extend_lengths"] = [1] * nd
+        fpm["scheduled_requests"]["past_kv_lengths"] = past
+        iterations.append([fpm])
+    params = {"max_iter": 40, "learning_rate": 0.1, "max_leaf_nodes": 15, "min_samples_leaf": 5}
+    artifact = fpm_learned.train(iterations, "decode", target=target, min_store_rows=10, **params)
+
+    # Same rows, hyperparameters and seed as the trainer, so the fit is identical.
+    rows, y_ms = fpm_learned.build_dataset(iterations, "decode", artifact["features"])["pure_decode"]
+    y_fit = [math.log(v) for v in y_ms] if target == "log_ms" else y_ms
+    reference = HistGradientBoostingRegressor(random_state=0, early_stopping=False, **params).fit(rows, y_fit)
+    expected = reference.predict(rows)
+    if target == "log_ms":
+        expected = [math.exp(v) for v in expected]
+
+    model = RustForwardPassPerfModel.from_learned(artifact)
+    for iteration, want in zip(iterations, expected, strict=True):
+        assert model.estimate_forward_pass_time_ms(iteration) == pytest.approx(want, rel=1e-9)
 
 
 def test_build_dataset_rejects_misaligned_request_lists() -> None:

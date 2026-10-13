@@ -1154,7 +1154,7 @@ the upstream copyright header and marks the modified conversion in the output.
 ## SGLang simulator and HiSim feature definitions
 
 The per-request feature set of the learned forward-pass model
-(`REQUEST_FEATURE_NAMES` in `src/aisimulate_core/sdk/fpm_learned.py` and
+(`REQUEST_FEATURE_NAMES` in `python/aisimulate/src/aisimulate_core/sdk/fpm_learned.py` and
 `REQUEST_FEATURE_NAMES` in `crates/core/src/perfmodel/fpm/learned.rs`,
 relative to the repository root) is a re-implementation of the 18 batch
 features defined by `MLTimePredictor.FEATURE_NAMES` in the SGLang simulator,
@@ -1174,3 +1174,4 @@ https://github.com/sgl-project/sglang/blob/59799a368793b9f795baf59b067233a65ad8e
 https://github.com/alibaba/tair-kvcache/blob/85402f1a012fb4279be5bb4b57613bb0a067d361/LICENSE
 
 The AISimulate files are modified re-implementations, not verbatim copies.
+Both derived files carry the source URLs and revisions in their headers.

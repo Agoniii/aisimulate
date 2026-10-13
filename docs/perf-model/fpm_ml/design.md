@@ -9,7 +9,7 @@ and is exposed today through the SDK (`aisimulate_core.sdk.fpm_learned` for trai
 
 Companion document in this directory: [`learned-forward-pass-model.md`](learned-forward-pass-model.md)
 (how to collect, train and use).
-The existing FPM documentation under `../fpm/` is unchanged; everything about the learned model lives here.
+The whole-forward FPM workflow is documented in [`../fpm-self-service/`](../fpm-self-service/README.md); everything about the learned model lives here.
 
 ## 1. Problem and design goals
 

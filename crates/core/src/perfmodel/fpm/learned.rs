@@ -1,5 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+// Feature definitions adapted from (re-implemented; no upstream source copied):
+// - SGLang simulator `MLTimePredictor.FEATURE_NAMES` (18 batch features),
+//   revision 59799a368793b9f795baf59b067233a65ad8e38e,
+//   path tools/sglang-simulator/src/sglang_simulator/time_predictor/ml.py,
+//   https://github.com/sgl-project/sglang/blob/59799a368793b9f795baf59b067233a65ad8e38e/tools/sglang-simulator/src/sglang_simulator/time_predictor/ml.py,
+//   copyright the SGLang project contributors, Apache-2.0.
+// - HiSim (Alibaba tair-kvcache) XGBoost predictor (32 present/past/extend slots),
+//   revision 85402f1a012fb4279be5bb4b57613bb0a067d361,
+//   path hisim/src/hisim/time_predictor/aiconfigurator.py,
+//   https://github.com/alibaba/tair-kvcache/blob/85402f1a012fb4279be5bb4b57613bb0a067d361/hisim/src/hisim/time_predictor/aiconfigurator.py,
+//   copyright Alibaba Group, Apache-2.0.
+// Modified: names, ordering and formulas adapted to AISimulate FPM fields.
+// See THIRD_PARTY_NOTICES.md.
 
 //! Learned forward-pass model: an offline-trained tree ensemble over
 //! `ForwardPassMetrics` batch-composition features.

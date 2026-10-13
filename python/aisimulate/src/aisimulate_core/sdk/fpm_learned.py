@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Feature definitions adapted from (re-implemented; no upstream source copied):
+# - SGLang simulator `MLTimePredictor.FEATURE_NAMES` (18 batch features),
+#   revision 59799a368793b9f795baf59b067233a65ad8e38e,
+#   path tools/sglang-simulator/src/sglang_simulator/time_predictor/ml.py,
+#   https://github.com/sgl-project/sglang/blob/59799a368793b9f795baf59b067233a65ad8e38e/tools/sglang-simulator/src/sglang_simulator/time_predictor/ml.py,
+#   copyright the SGLang project contributors, Apache-2.0.
+# - HiSim (Alibaba tair-kvcache) XGBoost predictor (32 present/past/extend slots),
+#   revision 85402f1a012fb4279be5bb4b57613bb0a067d361,
+#   path hisim/src/hisim/time_predictor/aiconfigurator.py,
+#   https://github.com/alibaba/tair-kvcache/blob/85402f1a012fb4279be5bb4b57613bb0a067d361/hisim/src/hisim/time_predictor/aiconfigurator.py,
+#   copyright Alibaba Group, Apache-2.0.
+# Modified: names, ordering and formulas adapted to AISimulate FPM fields.
+# See THIRD_PARTY_NOTICES.md.
 
 """Train a learned forward-pass model from real-deployment FPM telemetry.
 
@@ -113,7 +126,7 @@ SLOT_FEATURE_NAMES: tuple[str, ...] = tuple(
 FEATURE_NAMES: tuple[str, ...] = AGGREGATE_FEATURE_NAMES + REQUEST_FEATURE_NAMES + SLOT_FEATURE_NAMES
 
 # Atomic per-request feature sets: the smallest subsets of the 18 from which all
-# 18 can be computed back (docs/fpm_ml/design.md §3.1). Prefill: the ten that are
+# 18 can be computed back (docs/perf-model/fpm_ml/design.md §3.1). Prefill: the ten that are
 # not functions of the others. Decode: every request extends by one token, so
 # Σe = n, max e = min e = 1, Σe² = n and Σe·p = Σp, and five remain.
 ATOMIC_PREFILL_FEATURE_NAMES: tuple[str, ...] = (
