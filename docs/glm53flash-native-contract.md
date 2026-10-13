@@ -52,7 +52,10 @@ like Kimi-K3 and DeepSeek-V4:
 KDA `kernel_source` names per backend and phase are listed in
 `sdk/models/glm53flash.py::KDA_KERNELS` (merged-qkv `causal_conv1d_fn`;
 vLLM `flashkda_fwd`/`fused_recurrent_kda`; SGLang
-`chunk_kda`/`fused_sigmoid_gating_delta_rule_update`). mHC runs on all of a
+`chunk_kda`/`fused_sigmoid_gating_delta_rule_update`). A vLLM context step of one new token
+over existing state is a decode in vLLM's KDA metadata, so it is priced by the
+`causal_conv1d_update`/`fused_recurrent_kda` rows collected under phase
+`context` at seq_len 1; SGLang always runs extends on the prefill pair. mHC runs on all of a
 rank's scheduled tokens: vLLM sequence-parallel MoE requires EP and DP>1. Known approximation: the router is priced by the BF16 (288 x 4096) GEMM row.
 The serving gate (vLLM `GateLinear`, SGLang `MoEGate`) uses BF16 weights with
 FP32 output; no generic `gemm_perf` dtype captures the FP32 output and the

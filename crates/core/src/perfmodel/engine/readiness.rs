@@ -131,7 +131,10 @@ impl Availability<'_> {
     /// GLM tables must come from the exact requested runtime: the primary
     /// file of this system/backend/version or an explicitly declared
     /// `reuse.yaml` donor. Nearest-earlier siblings and cross-backend fill
-    /// are not admitted for GLM SILICON.
+    /// are not admitted for GLM SILICON: the generic readers merge every
+    /// resolved source into one table, so a borrowed source (shared layer
+    /// on) could answer a GLM lookup with another runtime's row. Its
+    /// presence is rejected here rather than filtered per lookup.
     fn exact(&mut self, name: &str) -> Result<(), AicError> {
         let key = format!("exact:{name}");
         if let Some(found) = self.tables.get(&key) {
@@ -141,12 +144,27 @@ impl Availability<'_> {
                 Err(self.exact_miss(name))
             };
         }
-        let mut found = false;
-        for source in self
+        let sources = self
             .db
             .source_resolver
-            .prioritized_sources_for(name, &self.db.data_root)?
-        {
+            .prioritized_sources_for(name, &self.db.data_root)?;
+        if let Some(borrowed) = sources.iter().find(|source| {
+            !matches!(source.channel, "primary" | "declared_reuse")
+                && source.source.path().is_file()
+        }) {
+            return Err(AicError::PerfDatabase(format!(
+                "GLM-5.3-Flash SILICON reads {name} only from the exact runtime {}/{}, but \
+                 the shared layer also loads {} ({} channel, version {}); set \
+                 enable_shared_layer=False",
+                self.db.backend,
+                self.db.version,
+                borrowed.source.path().display(),
+                borrowed.channel,
+                borrowed.version,
+            )));
+        }
+        let mut found = false;
+        for source in sources {
             if !matches!(source.channel, "primary" | "declared_reuse")
                 || !source.source.path().is_file()
             {
@@ -535,19 +553,20 @@ mod tests {
         let mut sparse = crate::operators::glm53flash::tests::attention("sparse_mla");
         sparse.checkpoint_format = "fp8".into();
         let sparse = Op::Glm53Attention(sparse);
-        let load = |mode| {
+        let load_shared = |mode, shared| {
             PerfDatabase::load_resolved(
                 root.path(),
                 "b200_sxm",
                 "vllm",
                 RUNTIME,
-                true,
+                shared,
                 false,
                 false,
             )
             .unwrap()
             .with_mode(mode, TransferPolicy::ALL)
         };
+        let load = |mode| load_shared(mode, true);
         for op in [&mhc, &sparse] {
             let error = validate(&load(DatabaseMode::Silicon), [op].into_iter()).unwrap_err();
             assert!(error.to_string().contains("exact runtime"), "{error}");
@@ -559,16 +578,90 @@ mod tests {
         table(&data.join(format!(
             "glm53_attention/vllm/{RUNTIME}/glm53_attention_module_perf.parquet"
         )));
-        validate(&load(DatabaseMode::Silicon), [&mhc, &sparse].into_iter()).unwrap();
+        // The exact tables exist, but the shared layer would merge the
+        // earlier runtime's mHC rows into the same reader.
+        let error = validate(&load(DatabaseMode::Silicon), [&mhc].into_iter()).unwrap_err();
+        assert!(
+            error.to_string().contains("enable_shared_layer=False"),
+            "{error}"
+        );
+        validate(
+            &load_shared(DatabaseMode::Silicon, false),
+            [&mhc, &sparse].into_iter(),
+        )
+        .unwrap();
         // A GLM boundary without a generic composition cannot be SILICON.
         let bare = Op::Glm53Attention(crate::operators::glm53flash::tests::attention("kda"));
-        let error = validate(&load(DatabaseMode::Silicon), [&bare].into_iter()).unwrap_err();
+        let error = validate(
+            &load_shared(DatabaseMode::Silicon, false),
+            [&bare].into_iter(),
+        )
+        .unwrap_err();
         assert!(
             error
                 .to_string()
                 .contains("no measured generic composition"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn glm53_silicon_rejects_shared_layer_rows_from_another_runtime() {
+        // Review probe: vLLM 0.31.0 has only a `post` mHC row and 0.30.0 a
+        // 14 ms `pre` row with the same (hc_mult, hidden_size) key. With the
+        // shared layer on, the generic reader answers GLM `pre` with the
+        // borrowed row (7 ms per site, labelled silicon); readiness must
+        // refuse that database, and without sharing the lookup must miss.
+        use crate::operators::glm53flash::tests::{ctx, mhc_site};
+        let root = tempfile::tempdir().unwrap();
+        let systems = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python/aisimulate/src/aisimulate_core/systems");
+        std::fs::copy(systems.join("gb300.yaml"), root.path().join("gb300.yaml")).unwrap();
+        let data = root.path().join("data/gb300/mhc/vllm");
+        for (version, role, latency) in [("0.31.0", "post", 0.03), ("0.30.0", "pre", 14.0)] {
+            let dir = data.join(version);
+            std::fs::create_dir_all(&dir).unwrap();
+            write_parquet(
+                &dir.join("mhc_module_perf.parquet"),
+                &[
+                    Col::Str("op_name", vec![role; 2]),
+                    Col::I64("num_tokens", vec![16, 1024]),
+                    Col::I64("hc_mult", vec![4; 2]),
+                    Col::I64("hidden_size", vec![4096; 2]),
+                    Col::F64("latency", vec![latency; 2]),
+                    Col::Str("kernel_source", vec!["fixture"; 2]),
+                ],
+            );
+        }
+        let load = |shared| {
+            PerfDatabase::load_resolved(
+                root.path(),
+                "gb300",
+                "vllm",
+                "0.31.0",
+                shared,
+                false,
+                false,
+            )
+            .unwrap()
+            .with_mode(DatabaseMode::Silicon, TransferPolicy::ALL)
+        };
+        let mut pre = mhc_site("pre");
+        pre.backend = "vllm".into();
+        let c = ctx(1024, 1, 0, false);
+        let shared = load(true);
+        let borrowed = pre.query(&shared, &c).unwrap();
+        assert_eq!(borrowed.latency_ms, 7.0);
+        let op = Op::Glm53Mhc(pre.clone());
+        let error = validate(&shared, [&op].into_iter()).unwrap_err();
+        assert!(
+            error.to_string().contains("enable_shared_layer=False"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("0.30.0"), "{error}");
+        let exact = load(false);
+        validate(&exact, [&op].into_iter()).unwrap();
+        assert!(pre.query(&exact, &c).is_err());
     }
 
     #[test]

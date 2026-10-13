@@ -56,6 +56,10 @@ def _specs(operations) -> list[dict]:
 # decode. SGLang 0.5.20 kda_backend.py: chunk_kda prefill; decode skips the
 # packed T=1 kernel because GLM sets lower_bound (-5), so it runs
 # fused_sigmoid_gating_delta_rule_update. One row = one layer on one TP rank.
+# These are the prefill pairs. A vLLM context step of one new token over
+# existing state runs the decode pair (causal_conv1d_update,
+# fused_recurrent_kda); Rust selects it per step from the phase-context rows
+# at seq_len 1 (Glm53AttentionOp::kda_measured_for).
 KDA_KERNELS = {
     ("vllm", "context"): ("causal_conv1d_fn", "flashkda_fwd"),
     ("vllm", "generation"): ("causal_conv1d_update", "fused_recurrent_kda"),

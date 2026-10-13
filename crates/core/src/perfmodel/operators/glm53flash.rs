@@ -480,6 +480,42 @@ impl Glm53AttentionOp {
         }
         Ok(result)
     }
+    /// KDA kernel pair of this step. vLLM 0.31.0 classifies a one-token
+    /// extend over existing state as a decode
+    /// (`v1/attention/backends/gdn_attn.py:268-296`: a request is a prefill
+    /// only when its query is longer than one token or it is the first
+    /// chunk), so it runs `causal_conv1d_update` + `fused_recurrent_kda`;
+    /// `collect_kda.py` publishes those rows under phase `context` at
+    /// seq_len 1. SGLang 0.5.20 runs every extend batch through
+    /// `forward_extend` (`kda_backend.py:795-843`), so its prefill pair is
+    /// kept. The context phase key is unchanged.
+    fn kda_measured_for(&self, ctx: &RuntimeContext) -> std::borrow::Cow<'_, [Op]> {
+        const VLLM_CACHED_ONE_TOKEN: [(&str, &str); 2] = [
+            ("causal_conv1d_fn", "causal_conv1d_update"),
+            ("flashkda_fwd", "fused_recurrent_kda"),
+        ];
+        if self.backend != "vllm" || !self.is_context || ctx.s != 1 || ctx.prefix == 0 {
+            return std::borrow::Cow::Borrowed(&self.measured);
+        }
+        std::borrow::Cow::Owned(
+            self.measured
+                .iter()
+                .map(|child| match child {
+                    Op::Kda(kda) if kda.phase == "context" => {
+                        let mut kda = kda.clone();
+                        if let Some((_, decode)) = VLLM_CACHED_ONE_TOKEN
+                            .iter()
+                            .find(|(prefill, _)| *prefill == kda.kernel_source)
+                        {
+                            kda.kernel_source = (*decode).into();
+                        }
+                        Op::Kda(kda)
+                    }
+                    other => other.clone(),
+                })
+                .collect(),
+        )
+    }
     pub fn query(
         &self,
         db: &PerfDatabase,
@@ -501,7 +537,8 @@ impl Glm53AttentionOp {
                 sol()
             }
             _ if self.layer_kind == "kda" => {
-                measured_query(db, ctx, "attention", &self.measured, sol)
+                let measured = self.kda_measured_for(ctx);
+                measured_query(db, ctx, "attention", &measured, sol)
             }
             _ => {
                 // Context: per-request query length over a cached prefix.
@@ -1332,7 +1369,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn mhc_site(role: &str) -> Glm53MhcOp {
+    pub(crate) fn mhc_site(role: &str) -> Glm53MhcOp {
         Glm53MhcOp {
             name: "mhc_pre_attn_1".into(),
             role: role.into(),
@@ -1346,7 +1383,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn ctx(batch: u32, s: u32, prefix: u32, is_context: bool) -> RuntimeContext {
+    pub(crate) fn ctx(batch: u32, s: u32, prefix: u32, is_context: bool) -> RuntimeContext {
         RuntimeContext {
             batch_size: batch,
             s,
@@ -1519,6 +1556,89 @@ pub(crate) mod tests {
                 .contains("no glm53_attention_module_perf.parquet"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn vllm_cached_one_token_extend_uses_the_decode_kda_rows() {
+        use crate::perf_database::energy_test_fixtures::{Col, write_parquet};
+        let root = tempfile::tempdir().unwrap();
+        let systems = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python/aisimulate/src/aisimulate_core/systems");
+        std::fs::copy(systems.join("gb300.yaml"), root.path().join("gb300.yaml")).unwrap();
+        // Context rows: prefill pair at seq 2/4, decode-path pair at seq 1
+        // (as collect_kda.py publishes them), batch 1/2, 32 local heads.
+        let mut rows: Vec<(&str, i64, i64, f64)> = vec![];
+        for (kernel, latency) in [("causal_conv1d_fn", 3.0), ("flashkda_fwd", 20.0)] {
+            for batch in [1, 2] {
+                for seq in [2, 4] {
+                    rows.push((kernel, batch, seq, latency * seq as f64));
+                }
+            }
+        }
+        for (kernel, latency) in [("causal_conv1d_update", 0.5), ("fused_recurrent_kda", 1.5)] {
+            for batch in [1, 2] {
+                rows.push((kernel, batch, 1, latency));
+            }
+        }
+        let n = rows.len();
+        for backend in ["vllm", "sglang"] {
+            let dir = root
+                .path()
+                .join("data/gb300/kda")
+                .join(backend)
+                .join("0.31.0");
+            std::fs::create_dir_all(&dir).unwrap();
+            write_parquet(
+                &dir.join("kda_perf.parquet"),
+                &[
+                    Col::Str("kernel_source", rows.iter().map(|r| r.0).collect()),
+                    Col::Str("phase", vec!["context"; n]),
+                    Col::I64("batch_size", rows.iter().map(|r| r.1).collect()),
+                    Col::I64("seq_len", rows.iter().map(|r| r.2).collect()),
+                    Col::I64("d_model", vec![4096; n]),
+                    Col::I64("d_conv", vec![4; n]),
+                    Col::I64("num_k_heads", vec![32; n]),
+                    Col::I64("head_k_dim", vec![128; n]),
+                    Col::I64("num_v_heads", vec![32; n]),
+                    Col::I64("head_v_dim", vec![128; n]),
+                    Col::F64("latency", rows.iter().map(|r| r.3).collect()),
+                ],
+            );
+        }
+        let query = |backend: &str, s: u32, prefix: u32| {
+            let db = PerfDatabase::load_resolved(
+                root.path(),
+                "gb300",
+                backend,
+                "0.31.0",
+                false,
+                false,
+                false,
+            )
+            .unwrap()
+            .with_mode(DatabaseMode::Silicon, TransferPolicy::ALL);
+            let mut op = attention("kda");
+            op.backend = backend.into();
+            op.measured = vec![
+                kda_kernel("causal_conv1d_fn", "context"),
+                kda_kernel("flashkda_fwd", "context"),
+            ];
+            op.query(&db, &ctx(2, s, prefix, true)).unwrap()
+        };
+        // vLLM, one new token over 128 cached tokens: the exact decode-path
+        // context rows, not an extrapolation of the two-token prefill rows.
+        let cached = query("vllm", 1, 128);
+        assert_eq!(cached.latency_ms, 2.0);
+        assert_eq!(cached.source, Source::Silicon);
+        // A first chunk and multi-token chunks keep the prefill pair.
+        assert_eq!(query("vllm", 2, 128).latency_ms, 46.0);
+        assert_ne!(query("vllm", 1, 0).latency_ms, 2.0);
+        // SGLang extends always run the prefill kernels.
+        assert_eq!(
+            query("sglang", 1, 128).latency_ms,
+            query("sglang", 1, 0).latency_ms
+        );
+        assert_eq!(query("sglang", 2, 128).latency_ms, 46.0);
     }
 
     #[test]
