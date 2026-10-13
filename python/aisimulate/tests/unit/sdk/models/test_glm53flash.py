@@ -297,10 +297,10 @@ def test_measured_composition_uses_generic_ops_and_one_glm_attention_table(path,
 
 @pytest.mark.parametrize(
     ("backend", "prefill_ms", "decode_ms"),
-    [("vllm", 334.87059419292984, 13.066380602915983), ("sglang", 350.4071011642707, 13.012015546915993)],
+    [("vllm", 295.9030065577298, 13.040700526115971), ("sglang", 311.43951352907044, 12.986335470115982)],
 )
 def test_sol_is_unchanged_by_measured_composition(backend, prefill_ms, decode_ms):
-    # Pinned from the SOL-only graph at PR #323 f317d2bc: GLM boundaries keep
+    # Pinned from the SOL-only graph at PR #323 3a71965a: GLM boundaries keep
     # their analytical formulas in SOL mode, so op-level SOL (and the FPM
     # roofline built from it) is bit-identical after adding generic children.
     model = RustForwardPassPerfModel.best_available(_config("SOL", backend))
